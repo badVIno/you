@@ -267,7 +267,9 @@
         if (Math.floor(prev * 2) !== Math.floor(P.stepPhase * 2)) {
           const hard = false;
           const vol = U.lerp(0.55, 1.15, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.crouch * 0.45);
-          if (audio) audio.step(hard, vol);
+          const run = U.clamp01((P.speed - PHYS.walk) / (PHYS.sprint - PHYS.walk));
+          /* звук — только у управляемого бойца: камера и шаги на одной фазе */
+          if (audio && active) audio.step(hard, vol, run);
           /* толчок в оружие от шага — то самое ощущение веса */
           P.recoil.v += U.lerp(0.10, 0.34, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.ads * 0.55);
           P.lastStepSide *= -1;
