@@ -34,6 +34,9 @@
       let d = 0;
       if (group === 'shirt' && ax >= 0.23) {
         d = sstep(0.23, 0.31, ax) * (0.013 - 0.0025 * sstep(0.40, 0.55, ax)) * (1 - 0.5 * sstep(0.66, 0.77, ax));
+        /* рукав кончается у запястья: дальше — манжета перчатки GLB */
+        const xEnd = (J && J.wristR ? Math.abs(J.wristR[0]) : 0.757) - 0.018;
+        if (ax > xEnd) pos[v * 3] = Math.sign(x) * (xEnd + (ax - xEnd) * 0.12);
       } else if (group === 'pants') {
         const h = y - ankY;
         d = 0.006 * sstep(0.05, 0.12, h) * (1 - sstep(0.16, 0.26, h));

@@ -13,11 +13,11 @@
    снаряжения и перчаток, нашивка подразделения.
    ========================================================================== */
 (function (root, factory) {
-  const C = factory(root.GUtil, root.GBuf, root.GSkel, root.GSoldier, root.GTex, root.GHands,
-    root.GBody, root.GCloth, root.GGear);
+  const C = factory(root.GUtil, root.GBuf, root.GSkel, root.GSoldier, root.GTex,
+    root.GBody, root.GCloth, root.GGear, root.GAK);
   if (typeof module !== 'undefined' && module.exports) module.exports = C;
   else root.GChar = C;
-})(typeof self !== 'undefined' ? self : this, function (U, B, SK, S, T, HANDS, BODYMOD, CLOTH, GEAR) {
+})(typeof self !== 'undefined' ? self : this, function (U, B, SK, S, T, BODYMOD, CLOTH, GEAR, AKA) {
   'use strict';
 
   /* ---------------------------------------------------------- пресеты --- */
@@ -468,8 +468,10 @@
        на реальной форме. */
     P.camoTile = 0.42;
     const geos = pack ? packGeometry(THREE, pack, P, BI) : soldierGeometry(THREE, P, M, BI, rest);
-    /* перчатки модели заменяются процедурными: пальцы раздельные (см. hands.js) */
-    if (pack && HANDS) Object.assign(geos, HANDS.gloveGeometry(THREE, pack.hdr.joints, BI, 'pack'));
+    /* кисти — перчатки GLB рига (viewmodel/ak.js); перчатка модели — запасная */
+    const handAssets = typeof self !== 'undefined' && self.GAssets && self.GAssets.data.vm_hands;
+    const glbHands = !!(pack && AKA && handAssets);
+    if (glbHands) delete geos.glove;
     /* наколенники и нашивки на рукавах (gear.js) */
     if (pack && GEAR) Object.assign(geos, GEAR.gearGeometry(THREE, pack.hdr.joints, BI, P));
 
@@ -511,11 +513,13 @@
     }
     enableDQS(THREE, skeleton, Object.values(meshes));
 
-    return {
+    const char = {
       key, preset: P, root, skeleton, bones: tb, boneIndex: BI, metrics: M,
       rest, meshes, materials: mats,
       bone: (n) => tb[BI[n]]
     };
+    if (glbHands) char.hands = AKA.attachHands(char, handAssets);
+    return char;
   }
 
   /* ------------------------------------ dual quaternion skinning --- */
@@ -703,6 +707,18 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     }
   }
 
+  /* Край рукава живёт с предплечьем: вес костей кисти и пальцев у кителя
+     переходит на foreTwist, иначе манжета поворачивалась бы вместе с кистью. */
+  function sleeveToForearm(si, sw, n, BI) {
+    const HAND = /^(wrist|palm|thumb|index|middle|ring|pinky)([RL])/;
+    const to = {};
+    for (const name in BI) {
+      const m = name.match(HAND);
+      if (m) to[BI[name]] = BI['foreTwist' + m[2]] !== undefined ? BI['foreTwist' + m[2]] : BI['elbow' + m[2]];
+    }
+    for (let i = 0; i < n * 4; i++) if (sw[i] > 0 && to[si[i]] !== undefined) si[i] = to[si[i]];
+  }
+
   function packGeometry(THREE, pack, P, BI) {
     const hdr = pack.hdr, bin = pack.bin;
     const remap = hdr.bones.map((n) => (BI[n] === undefined ? BI.hips : BI[n]));
@@ -728,6 +744,7 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
         const sw8 = new Uint8Array(bin, m.sw[0], m.sw[1]), sw = new Float32Array(n * 4);
         for (let i = 0; i < sw.length; i++) sw[i] = sw8[i] / 255;
         splitTwist(si16, sw, pos, n, BI, hdr.joints);
+        if (grp === 'shirt') sleeveToForearm(si16, sw, n, BI);
         geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si16, 4));
         geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
         geo.setIndex(new THREE.BufferAttribute(m.index32 ? new Uint32Array(bin, m.index[0], m.index[1])
@@ -878,8 +895,9 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     out.pants = garment(camo, { mean: texOf.pants.mean, detail: tx('pants', 'map', true), normal: tx('pants', 'normalMap'), detailK: 0.9, tile: P.camoTile });
     out.vest = tintedMat(THREE, pack, texOf.vest, P.gearCol);
     out.boot = tintedMat(THREE, pack, texOf.boot, P.bootCol);
-    if (HANDS) Object.assign(out, HANDS.gloveMaterials(THREE, P, T, srgb, mkTex, cached));
-    else out.glove = tintedMat(THREE, pack, texOf.glove, P.gloveCol, { roughness: 0.8 });
+    out.glove = tintedMat(THREE, pack, texOf.glove, P.gloveCol, { roughness: 0.8 });
+    /* камуфляж — рукавам рига от первого лица (game/bodycam.js) */
+    out._camo = camo;
 
     /* Головные уборы и балаклава: развёртка у них в метрах, поэтому
        тканевые карты нормалей ложатся с реальным шагом нити. */
