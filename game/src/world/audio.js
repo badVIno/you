@@ -27,11 +27,27 @@
       if (!AC) { A.on = false; return null; }
       const ctx = A.ctx = new AC();
 
+      /* Тракт микрофона бодикама (по AudioEngine из bodycam_angar.html):
+         маленькая капсула не берёт низ (срез 120 Гц) и верх (7,8 кГц), у неё
+         подъём присутствия около 2,8 кГц; дальше — перегруз предусилителя и
+         жёсткий компрессор с автоуровнем. Именно это даёт «звук с бодикама»:
+         выстрел сплющен и хрустит, а шаги, дыхание и шорох снаряжения —
+         близко и громко. */
       const master = ctx.createGain(); master.gain.value = 0.8;
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 120; hp.Q.value = 0.7;
+      const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 2800; pres.Q.value = 0.9; pres.gain.value = 4;
+      const lpm = ctx.createBiquadFilter(); lpm.type = 'lowpass'; lpm.frequency.value = 7800;
+      const drive = ctx.createWaveShaper();
+      const curve = new Float32Array(2048);
+      for (let i = 0; i < curve.length; i++) { const x = i / (curve.length - 1) * 2 - 1; curve[i] = Math.tanh(2.2 * x) / Math.tanh(2.2); }
+      drive.curve = curve; drive.oversample = '2x';
       const comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = -16; comp.knee.value = 24; comp.ratio.value = 9;
-      comp.attack.value = 0.0015; comp.release.value = 0.26;
-      master.connect(comp); comp.connect(ctx.destination);
+      comp.threshold.value = -26; comp.knee.value = 6; comp.ratio.value = 12;
+      comp.attack.value = 0.001; comp.release.value = 0.45;
+      const makeup = ctx.createGain(); makeup.gain.value = 1.9;
+      const out = ctx.createGain(); out.gain.value = 0.62;
+      master.connect(hp); hp.connect(pres); pres.connect(lpm); lpm.connect(drive);
+      drive.connect(comp); comp.connect(makeup); makeup.connect(out); out.connect(ctx.destination);
 
       const dry = ctx.createGain(); dry.gain.value = 1; dry.connect(master);
 
@@ -50,7 +66,33 @@
 
       A.master = master; A.dry = dry; A.conv = conv; A.echo = dl;
       A.nb = mkNoise(ctx, 2.4);
+
+      /* Фон: ветер в соснах (низкий шум с медленным «дыханием»), шипение
+         капсулы. И ветер в микрофоне: на ходу и особенно на бегу воздух
+         бьёт в капсулу — низкое бубнение, громкость задаёт A.motion(). */
+      const loop = (freqType, f, q, g) => {
+        const s = ctx.createBufferSource(); s.buffer = A.nb; s.loop = true;
+        const fl = ctx.createBiquadFilter(); fl.type = freqType; fl.frequency.value = f; fl.Q.value = q;
+        const gg = ctx.createGain(); gg.gain.value = g;
+        s.connect(fl); fl.connect(gg); gg.connect(master); s.start(0, Math.random() * 2);
+        return { s, fl, gg };
+      };
+      const wind = loop('lowpass', 520, 0.5, 0.030);
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.09;
+      const lfoG = ctx.createGain(); lfoG.gain.value = 0.014;
+      lfo.connect(lfoG); lfoG.connect(wind.gg.gain); lfo.start();
+      loop('highpass', 4800, 0.6, 0.009);
+      A.micWind = loop('lowpass', 260, 0.9, 0.0001);
+      A.micWind.s.playbackRate.value = 0.8;
       return ctx;
+    };
+
+    /* k — 0..1 от скорости: ветер в микрофоне */
+    A.motion = function (k) {
+      if (!A.ctx || !A.micWind || !A.on) return;
+      const t = A.ctx.currentTime, kk = U.clamp01(k);
+      A.micWind.gg.gain.setTargetAtTime(0.0001 + 0.075 * kk * kk, t, 0.25);
+      A.micWind.fl.frequency.setTargetAtTime(180 + 260 * kk, t, 0.3);
     };
 
     function mkNoise(ctx, sec) {
@@ -281,52 +323,66 @@
     };
 
     /* --------------------------------------------------------- шаги --- */
-    /* Шаг по грунту с травой.
+    /* Берц по лесной подстилке (хвоя, сухие листья, веточки поверх грунта).
+       Строение — как у footstep() из bodycam_angar.html, но под лес:
 
-       ПОЧЕМУ БЫЛО ПОХОЖЕ НА КОЛОКОЛЬЧИКИ. Шаг собирался из синуса 70–96 Гц
-       и узкополосного шума с Q = 5 на 2,4–4,2 кГц. Оба слоя — это, по сути,
-       колокол: резонатор с высокой добротностью и медленным спадом. Ухо
-       слышит такой призвук как звон, а не как удар.
-
-       ЧТО ЗВУЧИТ НА САМОМ ДЕЛЕ. Подошва по земле — апериодический удар:
-       широкий шум с очень быстрой атакой и коротким спадом, без выраженной
-       высоты тона. Реальный шаг ещё и двухфазный: сначала пятка, через
-       40–70 мс — перекат на носок. Плюс шорох травы и глухое трение ткани
-       снаряжения. Металла в кадре нет, поэтому высокодобротных резонансов
-       здесь не осталось вовсе: максимум Q = 1,2. */
-    /* run (0..1) — бег: стопа ставится на середину, а не на пятку, поэтому
-       перекат короче; удар тяжелее (105 кг с бронёй), снаряжение на каждом
-       шаге подпрыгивает и глухо шуршит. */
-    A.step = function (hard, vol, run) {
+       шаг  — пятка: глухой удар грунта (короткий тон 110→55 Гц + низкий
+              шум), через 55–85 мс перекат на носок; подстилка трещит серией
+              коротких щелчков 1,8–4,5 кГц — хвоя и листья ломаются под
+              подошвой; изредка хрустит веточка;
+       бег  — стопа ставится на середину: один тяжёлый удар (105 кг с бронёй),
+              хруст короче и гуще, бронежилет и подсумки подпрыгивают
+              (глухой удар 380–560 Гц), магазины в подсумках постукивают,
+              ткань шуршит.
+       Тонов с долгим спадом нет: через подъём присутствия у микрофона они
+       превращаются в «тик-тик». side — правая/левая нога: у ног немного
+       разный тембр, шаги не звучат как копия друг друга. */
+    function litter(t0, span, count, gain, lo, hi) {
+      for (let i = 0; i < count; i++) {
+        const t = t0 + Math.pow(Math.random(), 1.6) * span;
+        A.nz(t, rnd(0.008, 0.022), { type: 'bandpass', freq: rnd(lo, hi), q: rnd(0.9, 1.6),
+          gain: gain * rnd(0.45, 1), atk: 0.0006 });
+      }
+    }
+    A.step = function (hard, vol, run, side) {
       if (!ready()) return;
       const t = A.now(0.001);
-      const v = (vol === undefined ? 1 : vol);
-      const r = run || 0;
-      /* небольшой разброс, чтобы шаги не были одинаковыми */
-      const det = rnd(0.92, 1.08);
+      const k = (vol === undefined ? 1 : vol);
+      const r = U.clamp01(run || 0);
+      const v = rnd(0.85, 1.15);
+      const f = rnd(0.92, 1.08) * (side > 0 ? 1.04 : 0.96);
 
-      /* 1. Пятка: глухой широкополосный удар. Спад 55–70 мс — земля,
-            а не бетон, поэтому послезвучия нет. */
-      A.nz(t, 0.062 + 0.02 * r, { type: 'lowpass', freq: (hard ? 300 : 190) * det * (1 - 0.15 * r), q: 0.6,
-        gain: 0.34 * v * (1 + 0.4 * r), atk: 0.0022, wet: 0.10 });
-      /* 2. Тело удара: уплотнение грунта под весом. */
-      A.nz(t + 0.002, 0.048, { type: 'bandpass', freq: rnd(320, 520), q: 0.7,
-        gain: 0.13 * v, atk: 0.0018 });
-      /* 3. Шорох травы и песчинок: рассеянный, без резонанса. */
-      A.nz(t + 0.004, 0.105, { type: 'highpass', freq: rnd(2600, 3800), q: 0.5,
-        gain: 0.055 * v, atk: 0.010 });
-      /* 4. Перекат на носок: второй, более слабый и глухой удар. */
-      const roll = t + rnd(0.042, 0.072) * (1 - 0.55 * r);
-      A.nz(roll, 0.045, { type: 'lowpass', freq: 230 * det, q: 0.6,
-        gain: 0.14 * v * (1 - 0.4 * r), atk: 0.0026 });
-      A.nz(roll + 0.002, 0.070, { type: 'highpass', freq: 3000, q: 0.5,
-        gain: 0.028 * v, atk: 0.008 });
-      /* 5. Снаряжение: ткань и стропы — глухое трение, НЕ звяканье. */
-      if (Math.random() < 0.7 + 0.3 * r) {
-        A.nz(t + rnd(0.015, 0.05), 0.085, { type: 'bandpass', freq: rnd(700, 1250),
-          q: 1.0, gain: 0.030 * v * (1 + r), atk: 0.012 });
+      if (r < 0.5) {
+        /* пятка */
+        A.osc(t, 0.07, 110 * f, 55, 0.26 * k * v, 'sine');
+        A.nz(t, 0.05, { type: 'lowpass', freq: 620 * f, q: 0.6, gain: 0.30 * k * v, atk: 0.0012, wet: 0.08 });
+        litter(t + 0.003, 0.07, 5 + (Math.random() * 3 | 0), 0.05 * k, 1800, 4200);
+        /* перекат на носок */
+        const roll = t + rnd(0.055, 0.085);
+        A.nz(roll, 0.045, { type: 'lowpass', freq: 880 * f, q: 0.6, gain: 0.12 * k * v, atk: 0.0015 });
+        litter(roll, 0.05, 3 + (Math.random() * 2 | 0), 0.035 * k, 2200, 4500);
+        /* ткань брюк и куртки */
+        A.nz(t + 0.02, 0.09, { type: 'bandpass', freq: 1300 * f, q: 0.6, gain: 0.022 * k, atk: 0.02 });
+      } else {
+        /* один тяжёлый удар середины стопы */
+        A.osc(t, 0.09, 95 * f, 45, 0.44 * k * v * r, 'sine');
+        A.nz(t, 0.06, { type: 'lowpass', freq: 780 * f, q: 0.6, gain: 0.42 * k * v, atk: 0.0012, wet: 0.08 });
+        litter(t + 0.002, 0.05, 7 + (Math.random() * 4 | 0), 0.065 * k, 1600, 4500);
+        /* отталкивание носком: подстилка разлетается */
+        A.nz(t + rnd(0.05, 0.07), 0.05, { type: 'highpass', freq: 2600, q: 0.5, gain: 0.03 * k * r, atk: 0.004 });
+        /* бронежилет и подсумки подпрыгивают и садятся обратно */
+        A.nz(t + rnd(0.04, 0.07), 0.07, { type: 'bandpass', freq: rnd(380, 560), q: 1.1, gain: 0.16 * k * r, atk: 0.002 });
+        /* магазины в подсумках */
+        if (Math.random() < 0.4) A.nz(t + rnd(0.05, 0.09), 0.02, { type: 'bandpass', freq: rnd(1000, 1400), q: 2.5, gain: 0.035 * k * r, atk: 0.0008 });
+        /* ткань и стропы */
+        A.nz(t + 0.03, 0.15, { type: 'bandpass', freq: 2200, q: 0.5, gain: 0.03 * k * r, atk: 0.04 });
       }
-      if (r > 0.3) A.gearRattle(0.6 + 0.6 * r);
+      /* веточка под ногой */
+      if (Math.random() < 0.07 + 0.05 * r) {
+        const ts = t + rnd(0.004, 0.03);
+        A.nz(ts, 0.012, { type: 'bandpass', freq: rnd(2200, 3200), q: 2.2, gain: 0.10 * k, atk: 0.0004 });
+        A.nz(ts + rnd(0.012, 0.03), 0.01, { type: 'bandpass', freq: rnd(1600, 2600), q: 2.0, gain: 0.05 * k, atk: 0.0004 });
+      }
     };
 
     /* Снаряжение на корпусе: нейлон, стропы, подсумки. Тоже без металла. */
@@ -340,14 +396,17 @@
       }
     };
 
-    /* дыхание при беге */
-    A.breath = function (heavy) {
-      if (!ready()) return;
+    /* Дыхание ртом (как breath() в исходнике): вдох — выше и мягче, выдох —
+       ниже и плотнее. k — 0..1, от спокойного до сбитого после бега. */
+    A.breath = function (k, inhale) {
+      if (!ready() || !(k > 0.02)) return;
       const t = A.now(0.001);
-      A.nz(t, heavy ? 0.28 : 0.20, {
-        type: 'bandpass', freq: heavy ? 620 : 780, q: 0.8,
-        gain: heavy ? 0.055 : 0.030, atk: 0.05
-      });
+      if (inhale) {
+        A.nz(t, 0.30 + 0.1 * k, { type: 'bandpass', freq: rnd(1300, 1600), q: 0.9, gain: 0.05 * k, atk: 0.14 });
+      } else {
+        A.nz(t, 0.28 + 0.12 * k, { type: 'bandpass', freq: rnd(700, 950), q: 0.8, gain: 0.08 * k, atk: 0.03 });
+        A.nz(t, 0.2, { type: 'lowpass', freq: 420, q: 0.7, gain: 0.05 * k, atk: 0.02 });
+      }
     };
 
     /* попадание в мишень: звонкий шлепок картона/стали с задержкой по
