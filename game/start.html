@@ -8549,14 +8549,19 @@ return {
     ];
     const events = [[0.18, 'magOut'], [0.24, 'drop'], [0.48, 'pouch'], [0.64, 'grab'], [1.16, 'magIn'], [1.26, 'seat']];
     const tuning = Object.assign({}, CONFIG.rifle, {
+      /* Позы — от глаз (шлемная камера, game/bodycam.js). Начало системы
+         оружия — задний срез коробки на оси канала; линия прицеливания АК
+         на 0,041 м выше оси, целик на 0,2185 м впереди среза. */
       poses: Object.assign({}, CONFIG.rifle.poses, {
-        /* целик АК на оси объектива в 0,40 м (он на 0,22 м впереди коробки);
-           дальше нельзя — затыльник приклада встаёт перед объективом */
-        ads: { pos: [0, -0.051, -0.13], rot: [0, 0, 0] },
-        /* бег — поворот рига (ствол вниз-влево); точка подвеса выше и чуть
-           вперёд: у АК ствол длиннее, и при исходной позе он уходил за нижний
-           край кадра, а приклад и так остаётся за объективом */
-        sprint: { pos: [0.04, -0.16, -0.14], rot: [-32, 28, -22] }
+        /* наготове: целик ~11 см ниже и ~8 см правее глаза, ствол сведён с
+           осью взгляда на ~15 м — от бедра пули идут туда, куда смотришь */
+        hip: { pos: [0.075, -0.15, -0.17], rot: [0.57, 0.29, -3] },
+        /* прицел: линия целик—мушка на оси объектива, вынос глаза 0,29 м */
+        ads: { pos: [0, -0.041, -0.075], rot: [0, 0, 0] },
+        /* бег: автомат поперёк груди, ствол вниз-влево; цевьё и опорная
+           рука остаются у нижнего края кадра, а не пропадают за ним */
+        sprint: { pos: [0.10, -0.19, -0.25], rot: [-21, 35, -30] },
+        wallTuck: { pos: [0.06, -0.30, -0.06], rot: [-32, 8, -4] }
       }),
       magSize: 30, auto: true
     });
@@ -15915,17 +15920,21 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
        40–70 мс — перекат на носок. Плюс шорох травы и глухое трение ткани
        снаряжения. Металла в кадре нет, поэтому высокодобротных резонансов
        здесь не осталось вовсе: максимум Q = 1,2. */
-    A.step = function (hard, vol) {
+    /* run (0..1) — бег: стопа ставится на середину, а не на пятку, поэтому
+       перекат короче; удар тяжелее (105 кг с бронёй), снаряжение на каждом
+       шаге подпрыгивает и глухо шуршит. */
+    A.step = function (hard, vol, run) {
       if (!ready()) return;
       const t = A.now(0.001);
       const v = (vol === undefined ? 1 : vol);
+      const r = run || 0;
       /* небольшой разброс, чтобы шаги не были одинаковыми */
       const det = rnd(0.92, 1.08);
 
       /* 1. Пятка: глухой широкополосный удар. Спад 55–70 мс — земля,
             а не бетон, поэтому послезвучия нет. */
-      A.nz(t, 0.062, { type: 'lowpass', freq: (hard ? 300 : 190) * det, q: 0.6,
-        gain: 0.34 * v, atk: 0.0022, wet: 0.10 });
+      A.nz(t, 0.062 + 0.02 * r, { type: 'lowpass', freq: (hard ? 300 : 190) * det * (1 - 0.15 * r), q: 0.6,
+        gain: 0.34 * v * (1 + 0.4 * r), atk: 0.0022, wet: 0.10 });
       /* 2. Тело удара: уплотнение грунта под весом. */
       A.nz(t + 0.002, 0.048, { type: 'bandpass', freq: rnd(320, 520), q: 0.7,
         gain: 0.13 * v, atk: 0.0018 });
@@ -15933,16 +15942,17 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
       A.nz(t + 0.004, 0.105, { type: 'highpass', freq: rnd(2600, 3800), q: 0.5,
         gain: 0.055 * v, atk: 0.010 });
       /* 4. Перекат на носок: второй, более слабый и глухой удар. */
-      const roll = t + rnd(0.042, 0.072);
+      const roll = t + rnd(0.042, 0.072) * (1 - 0.55 * r);
       A.nz(roll, 0.045, { type: 'lowpass', freq: 230 * det, q: 0.6,
-        gain: 0.14 * v, atk: 0.0026 });
+        gain: 0.14 * v * (1 - 0.4 * r), atk: 0.0026 });
       A.nz(roll + 0.002, 0.070, { type: 'highpass', freq: 3000, q: 0.5,
         gain: 0.028 * v, atk: 0.008 });
       /* 5. Снаряжение: ткань и стропы — глухое трение, НЕ звяканье. */
-      if (Math.random() < 0.7) {
+      if (Math.random() < 0.7 + 0.3 * r) {
         A.nz(t + rnd(0.015, 0.05), 0.085, { type: 'bandpass', freq: rnd(700, 1250),
-          q: 1.0, gain: 0.030 * v, atk: 0.012 });
+          q: 1.0, gain: 0.030 * v * (1 + r), atk: 0.012 });
       }
+      if (r > 0.3) A.gearRattle(0.6 + 0.6 * r);
     };
 
     /* Снаряжение на корпусе: нейлон, стропы, подсумки. Тоже без металла. */
@@ -16282,7 +16292,9 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
         if (Math.floor(prev * 2) !== Math.floor(P.stepPhase * 2)) {
           const hard = false;
           const vol = U.lerp(0.55, 1.15, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.crouch * 0.45);
-          if (audio) audio.step(hard, vol);
+          const run = U.clamp01((P.speed - PHYS.walk) / (PHYS.sprint - PHYS.walk));
+          /* звук — только у управляемого бойца: камера и шаги на одной фазе */
+          if (audio && active) audio.step(hard, vol, run);
           /* толчок в оружие от шага — то самое ощущение веса */
           P.recoil.v += U.lerp(0.10, 0.34, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.ads * 0.55);
           P.lastStepSide *= -1;
@@ -16477,12 +16489,15 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
    МОДУЛЬ: game/bodycam.js
    ========================================================================== */
 /* ============================================================================
-   Нагрудная камера (бодикам) и руки от первого лица — по bodycam_angar.html.
+   Шлемная камера (бодикам) и руки от первого лица — по bodycam_angar.html.
 
-   Камера висит на груди, а не в глазах: она догоняет взгляд пружиной
-   (корпус поворачивается следом за оружием), по наклону берёт лишь долю
-   взгляда, качается в такт шагам и вздрагивает на каждом шаге и выстреле.
-   Оружие водится внутри конуса перед грудью — ствол опережает камеру.
+   Камера закреплена на шлеме и стоит на уровне глаз бойца — на одной высоте
+   с глазами остальных. Куда смотрит голова, туда смотрит и объектив, поэтому
+   в прицеле целик и мушка ложатся ровно в центр кадра. От бодикама остаются
+   линза (рыбий глаз, хроматизм, скос строк, смаз, шум) и подвеска: камера
+   качается и вздрагивает строго на касаниях стоп — по той же фазе шага,
+   по которой звучат шаги и двигаются ноги (player.stepPhase: 0 и 0,5 —
+   касания правой и левой).
 
    Руки — риг из того же файла (viewmodel/vm.js): перчатки GLB, рукава,
    позы наготове / в прицеле / на бегу, отдача и перезарядка. Рукав берёт
@@ -16501,11 +16516,18 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
 
   /* параметры камеры и линзы (как в исходнике) */
   const P = {
-    fov: 92, adsFov: 64, distortion: 0.42, zoom: 0.74, chroma: 0.05, vignette: 1.0,
+    fov: 88, adsFov: 50, sprintFov: 92, distortion: 0.42, zoom: 0.74, chroma: 0.05, vignette: 1.0,
     sharpen: 0.55, grain: 0.05, rollingShutter: 0.45, motionBlur: 0.8,
-    bodyFollow: 2.4, pitchFollow: 0.62, bob: 1.0, shake: 1.0, maxOff: 0.55,
-    chestHeight: 1.40, crouchChest: 0.95, chestForward: 0.05
+    bob: 1.0, shake: 1.0,
+    /* В прицеле приклад лежит под щекой вровень с линией прицеливания и
+       закрывал пол-кадра серой плитой: ближняя плоскость отсекает его. */
+    near: 0.02, adsNear: 0.11
   };
+  /* Плечи рига относительно глаз: ~0,24 м ниже и чуть позади. Позы оружия
+     заданы в той же системе (viewmodel/ak.js). */
+  const SHOULDER_R = [0.18, -0.24, 0.13], SHOULDER_L = [-0.18, -0.24, 0.10];
+  /* плечи рига в прежней, нагрудной системе — для вида от третьего лица */
+  const SHOULDER_CHEST = [0.19, -0.12, 0.12];
 
   /* ---------------------------------------------------- линза бодикама -- */
   /* Проход после цветокоррекции: скос строк (rolling shutter), «рыбий
@@ -16592,6 +16614,8 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     const { scene, camera } = env;
     const assets = root().GAssets && root().GAssets.data.vm_hands;
     if (!VM || !AKA || !assets) return null;
+    VM.CONFIG.body.shoulderR = SHOULDER_R.slice();
+    VM.CONFIG.body.shoulderL = SHOULDER_L.slice();
 
     const model = AKA.createModel();
     const spec = AKA.createSpec(model);
@@ -16601,17 +16625,16 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     if (rig.flashlight.parent) rig.flashlight.parent.remove(rig.flashlight);
     if (rig.flashlight.target.parent) rig.flashlight.target.parent.remove(rig.flashlight.target);
     model.root.visible = false;                      // вместо модели — настоящий АК бойца
-    rig.root.position.set(0, 0.01, -0.05);           // линза шире, чем у рига (как в исходнике)
-    const frame = new THREE.Group();                 // «камера рига»
+    const frame = new THREE.Group();                 // «камера рига» = глаза
     frame.name = 'bodycamRig';
     frame.add(rig.root);
     scene.add(frame);
 
     const st = {
-      active: null, yawS: new Spring(P.bodyFollow, 0.95), pitchS: new Spring(2.8, 0.95),
+      active: null,
       shY: new Spring(7, 0.3), shP: new Spring(8, 0.32), shR: new Spring(6, 0.3), shYaw: new Spring(7, 0.35),
-      bobPhase: 0, bobAmp: 0, lastStep: 0, lastShot: -1, reloadWas: -1,
-      yawRate: 0, pitchRate: 0, prevY: 0, prevX: 0, fov: P.fov, t: 0,
+      moveK: 0, runK: 0, lastStep: 0, lastShot: -1, reloadWas: -1,
+      yawRate: 0, pitchRate: 0, prevY: 0, prevX: 0, t: 0,
       prevFwd: new THREE.Vector3(0, 0, -1), shift: new THREE.Vector2()
     };
     const camObj = new THREE.Object3D();             // камера для рига (позиция/поворот)
@@ -16622,9 +16645,8 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     function activate(s) {
       st.active = s;
       const c = s.ctrl;
-      st.yawS.x = c.yaw; st.yawS.v = 0;
-      st.pitchS.x = c.pitch * P.pitchFollow; st.pitchS.v = 0;
       for (const k of ['shY', 'shP', 'shR', 'shYaw']) { st[k].x = 0; st[k].v = 0; }
+      st.lastStep = Math.floor((c.stepPhase || 0) * 2);
       st.lastShot = c.lastShot; st.reloadWas = c.reload;
       st.prevY = c.yaw; st.prevX = c.pitch;
       const sm = sleeveMaterial(s.char);
@@ -16632,7 +16654,7 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
       rig.reloading = false;
     }
 
-    /* Кадр управляемого бойца. mode: 'fp' — камера на груди, руки рига;
+    /* Кадр управляемого бойца. mode: 'fp' — камера на шлеме, руки рига;
        'tp' — вид со стороны, риг лишь задаёт кисти телу. Возвращает
        true, если камера поставлена. */
     function update(dt, s, mode) {
@@ -16641,24 +16663,37 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
       st.t += dt;
       const aimYaw = c.yaw, aimPitch = c.pitch;
 
-      /* шаг: фаза и толчки на каждом касании */
+      /* Шаг. Фаза — та же, что у звука шагов и ног (player.js, locomotion.js):
+         ph = 2π·stepPhase, касание правой стопы при ph = 0, левой — при π.
+         Толчок камеры даётся в тот же кадр, что и звук шага. */
       const hs = c.speed || 0, moving = c.grounded === false ? 0 : hs;
-      st.bobAmp += (Math.min(moving / 2.4, 1.9) - st.bobAmp) * (1 - Math.exp(-dt * 6));
-      st.bobPhase += dt * (moving / 0.74) * Math.PI;
-      const step = Math.floor(st.bobPhase / Math.PI);
+      const PH = c.PHYS || { walk: 2.55, sprint: 4.55 };
+      const kk6 = 1 - Math.exp(-dt * 6);
+      st.moveK += (U.clamp(moving / PH.walk, 0, 1.25) - st.moveK) * kk6;
+      st.runK += (U.smoothstep(U.clamp((moving - PH.walk) / (PH.sprint - PH.walk), 0, 1)) - st.runK) * kk6;
+      const stepPh = c.stepPhase || 0, ph = stepPh * Math.PI * 2;
+      const step = Math.floor(stepPh * 2);
       if (step !== st.lastStep) {
         st.lastStep = step;
-        if (moving > 0.5) {
-          const k = P.shake * (moving > 3.8 ? 1.7 : 1);
-          st.shY.v -= 0.35 * k; st.shR.v += (step % 2 ? 1 : -1) * 0.3 * k; st.shP.v += 0.35 * k; st.shYaw.v += (step % 2 ? 1 : -1) * 0.15 * k;
+        if (moving > 0.35) {
+          const side = step % 2 ? -1 : 1;                 // чётное — правая стопа
+          const k = P.shake * U.lerp(0.55, 1.5, st.runK) * U.clamp(moving / PH.walk, 0.4, 1) * (1 - (c.ads || 0) * 0.5);
+          st.shY.v -= 0.30 * k; st.shP.v -= 0.30 * k; st.shR.v += side * 0.22 * k; st.shYaw.v += side * 0.10 * k;
         }
       }
-      const B = P.bob * (1 - (c.ads || 0) * 0.6);
-      const bobY = -Math.abs(Math.sin(st.bobPhase)) * 0.03 * st.bobAmp * B, bobX = Math.sin(st.bobPhase) * 0.02 * st.bobAmp * B;
-      const bobRoll = Math.sin(st.bobPhase) * 0.011 * st.bobAmp * B, bobPitch = Math.sin(st.bobPhase * 2) * 0.006 * st.bobAmp * B;
+      /* Голова: ниже всего сразу после касания (на бегу — в середине опоры),
+         вбок — к опорной ноге, крен туда же. Шлем гасит часть колебаний,
+         поэтому амплитуды меньше, чем у груди. */
+      const B = P.bob * st.moveK * (1 - (c.ads || 0) * 0.65);
+      const runK = st.runK;
+      const dip = 0.5 + 0.5 * Math.cos(2 * ph - U.lerp(0.35, 0.9, runK));
+      const bobY = -dip * U.lerp(0.016, 0.042, runK) * B;
+      const bobX = Math.sin(ph) * U.lerp(0.010, 0.018, runK) * B;
+      const bobRoll = Math.sin(ph) * U.lerp(0.008, 0.022, runK) * B;
+      const bobPitch = -dip * U.lerp(0.004, 0.012, runK) * B;
       const t = st.t;
       const nz = (a, b, cc) => Math.sin(t * a) * 0.5 + Math.sin(t * b + 1.3) * 0.3 + Math.sin(t * cc + 2.1) * 0.2;
-      const br = 0.0035 * P.shake * (1 + st.bobAmp * 0.8);
+      const br = 0.0025 * P.shake * (1 + st.moveK * 0.8 + runK);
 
       /* выстрел: вздрагивание камеры и отдача рига */
       if (c.lastShot !== st.lastShot) {
@@ -16680,34 +16715,37 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
       } else if (c.reload < 0 && rig.reloading && st.reloadWas >= 0) rig.reloading = false;
       st.reloadWas = c.reload;
 
-      /* пружины с подшагами */
+      /* пружины толчков с подшагами */
       const n = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / n;
       for (let i = 0; i < n; i++) {
-        /* в прицеле камера берёт весь наклон взгляда: мушка по центру */
-        st.yawS.step(aimYaw, h); st.pitchS.step(aimPitch * U.lerp(P.pitchFollow, 1, U.smoothstep(c.ads || 0)), h);
         st.shY.step(0, h); st.shP.step(0, h); st.shR.step(0, h); st.shYaw.step(0, h);
       }
-      /* ствол опережает камеру не больше чем на ~31° */
-      if (st.yawS.x < aimYaw - P.maxOff) st.yawS.x = aimYaw - P.maxOff;
-      if (st.yawS.x > aimYaw + P.maxOff) st.yawS.x = aimYaw + P.maxOff;
 
+      /* объектив смотрит туда же, куда голова: без запаздывания по курсу и
+         наклону, иначе ствол и центр кадра расходятся */
       const lean = c.lean || 0;
-      const camYaw = st.yawS.x + st.shYaw.x + nz(0.9, 1.9, 3.7) * br;
-      const camPitch = st.pitchS.x + bobPitch + st.shP.x + nz(1.1, 2.3, 4.7) * br;
-      const camRoll = bobRoll + st.shR.x + nz(0.7, 1.7, 3.1) * br * 0.8 - lean * 0.25;
+      const adsK = U.smoothstep(c.ads || 0);
+      const still = 1 - adsK * 0.6;
+      const camYaw = aimYaw + (st.shYaw.x + nz(0.9, 1.9, 3.7) * br) * still;
+      const camPitch = aimPitch + (bobPitch + st.shP.x + nz(1.1, 2.3, 4.7) * br) * still;
+      const camRoll = (bobRoll + st.shR.x + nz(0.7, 1.7, 3.1) * br * 0.8) * still - lean * 0.22;
       _e.set(camPitch, camYaw, camRoll, 'YXZ');
       const camQ = _q.setFromEuler(_e);
-      const bodyQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), st.yawS.x);
+      const headQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), aimYaw);
 
       if (mode === 'fp') {
-        const chestH = U.lerp(P.chestHeight, P.crouchChest, c.crouch || 0);
-        frame.position.set(c.pos.x, c.pos.y + chestH, c.pos.z)
-          .add(_v.set(bobX + lean * 0.15, bobY + st.shY.x, -P.chestForward).applyQuaternion(bodyQ));
+        /* глаза — по скелету бойца (как F.eyePosition в game.js): на одном
+           уровне с глазами остальных бойцов */
+        const M = s.char.metrics;
+        const eyeY = U.lerp(M.eyeY, M.eyeY - (M.hipY - 0.50), c.crouch || 0);
+        frame.position.set(c.pos.x, c.pos.y + eyeY - Math.abs(lean) * 0.055, c.pos.z)
+          .add(_v.set(bobX + lean * 0.30, bobY + st.shY.x * still, -(M.headRZ + 0.012)).applyQuaternion(headQ));
       } else {
-        /* плечи рига (0,19; -0,11; 0,07 от камеры) — на плечи тела */
+        /* плечи рига — на плечи тела */
         const sR = s.char.bone('shoulderR').getWorldPosition(new THREE.Vector3());
         const sL = s.char.bone('shoulderL').getWorldPosition(new THREE.Vector3());
-        frame.position.copy(sR.add(sL).multiplyScalar(0.5)).sub(_v.set(0, -0.11, 0.07).applyQuaternion(camQ));
+        const oy = -0.11 + (SHOULDER_R[1] - SHOULDER_CHEST[1]), oz = 0.07 + (SHOULDER_R[2] - SHOULDER_CHEST[2]);
+        frame.position.copy(sR.add(sL).multiplyScalar(0.5)).sub(_v.set(0, oy, oz).applyQuaternion(camQ));
       }
       frame.quaternion.copy(camQ);
       frame.updateMatrixWorld(true);
@@ -16732,7 +16770,7 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
         get aimPitch() { return aimPitch; }, set aimPitch(v) {},
         ads, sprint: spr,
         fatigue: 1 - (c.stamina / (c.PHYS ? c.PHYS.staminaMax : 7.2)),
-        grounded: c.grounded !== false, moveBlend: Math.min(hs / 2.4, 2), speed: hs, stepPhase: st.bobPhase,
+        grounded: c.grounded !== false, moveBlend: 1 + runK, speed: hs, stepPhase: ph,
         /* на бегу оружие прижато к груди и не водится за взглядом */
         offsetYaw: wrapAng(aimYaw - camYaw) * (1 - spr * 0.7), offsetPitch: wrapAng(aimPitch - camPitch) * (1 - spr * 0.9)
       };
@@ -16744,8 +16782,11 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
       if (mode === 'fp') {
         camera.position.copy(frame.position);
         camera.quaternion.copy(frame.quaternion);
-        const fov = U.lerp(P.fov, P.adsFov, ads);
-        if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
+        const fov = U.lerp(U.lerp(P.fov, P.sprintFov, spr), P.adsFov, ads);
+        const near = U.lerp(P.near, P.adsNear, U.smoothstep(U.clamp((ads - 0.55) / 0.4, 0, 1)));
+        if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
+          camera.fov = fov; camera.near = near; camera.updateProjectionMatrix();
+        }
         camera.updateMatrixWorld(true);
       }
       return true;
@@ -16771,6 +16812,8 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     return {
       rig, spec, frame, update, measureShift, handTargets, P,
       hide() { rig.root.visible = false; },
+      /* вне вида от первого лица ближняя плоскость — обычная */
+      resetNear() { if (camera.near !== P.near) { camera.near = P.near; camera.updateProjectionMatrix(); } },
       get lensAmount() { return st.lens || 0; }
     };
   }
@@ -17656,10 +17699,16 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
        так, чтобы его точки хвата легли ровно в них, поэтому поза не зависит
        от цевья и длины оружия. out — куда смотрит правый бок оружия. */
     /* right — место ПРАВОГО ЗАПЯСТЬЯ: кисть охватывает пистолетную
-       рукоятку, запястье — за ней (см. hands.js). */
+       рукоятку, запястье — за ней (см. hands.js).
+       Хват рукоятки задаёт продолжение кисти назад-вверх, вдоль приклада.
+       При прежней крутой диагонали (ствол на 48° вниз, рукоятка у рёбер)
+       оно смотрело вертикально вверх, локоть же висит у бока — запястье
+       выламывалось на 94°. Сейчас рукоятка ниже, у пояса, ствол опущен на
+       ~28° вниз-влево-вперёд, приклад у правой грудной: предплечье идёт
+       вдоль кисти, излом запястья ~23° (правая) и ~21° (левая). */
     const SLING = {
-      right: new THREE.Vector3(0.125, 1.330, -0.205),
-      barrel: new THREE.Vector3(-0.64, -0.74, -0.17),
+      right: new THREE.Vector3(0.125, 1.100, -0.250),
+      barrel: new THREE.Vector3(-0.60, -0.45, -0.65),
       out: new THREE.Vector3(0.20, 0.10, -1)
     };
     /* Бег: автомат прижат к груди стволом вниз — дуло смотрит в землю
@@ -18416,6 +18465,7 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
 
       /* 5. камера */
       updateCamera(dt);
+      if (BC && !(a && !S.tp && !S.spectate)) BC.resetNear();
       /* линза бодикама — только от первого лица */
       const post = C.getPost && C.getPost();
       /* включается плавно, выключается сразу — иначе при переходе на вид

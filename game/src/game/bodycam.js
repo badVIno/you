@@ -1,10 +1,13 @@
 /* ============================================================================
-   Нагрудная камера (бодикам) и руки от первого лица — по bodycam_angar.html.
+   Шлемная камера (бодикам) и руки от первого лица — по bodycam_angar.html.
 
-   Камера висит на груди, а не в глазах: она догоняет взгляд пружиной
-   (корпус поворачивается следом за оружием), по наклону берёт лишь долю
-   взгляда, качается в такт шагам и вздрагивает на каждом шаге и выстреле.
-   Оружие водится внутри конуса перед грудью — ствол опережает камеру.
+   Камера закреплена на шлеме и стоит на уровне глаз бойца — на одной высоте
+   с глазами остальных. Куда смотрит голова, туда смотрит и объектив, поэтому
+   в прицеле целик и мушка ложатся ровно в центр кадра. От бодикама остаются
+   линза (рыбий глаз, хроматизм, скос строк, смаз, шум) и подвеска: камера
+   качается и вздрагивает строго на касаниях стоп — по той же фазе шага,
+   по которой звучат шаги и двигаются ноги (player.stepPhase: 0 и 0,5 —
+   касания правой и левой).
 
    Руки — риг из того же файла (viewmodel/vm.js): перчатки GLB, рукава,
    позы наготове / в прицеле / на бегу, отдача и перезарядка. Рукав берёт
@@ -23,11 +26,18 @@
 
   /* параметры камеры и линзы (как в исходнике) */
   const P = {
-    fov: 92, adsFov: 64, distortion: 0.42, zoom: 0.74, chroma: 0.05, vignette: 1.0,
+    fov: 88, adsFov: 50, sprintFov: 92, distortion: 0.42, zoom: 0.74, chroma: 0.05, vignette: 1.0,
     sharpen: 0.55, grain: 0.05, rollingShutter: 0.45, motionBlur: 0.8,
-    bodyFollow: 2.4, pitchFollow: 0.62, bob: 1.0, shake: 1.0, maxOff: 0.55,
-    chestHeight: 1.40, crouchChest: 0.95, chestForward: 0.05
+    bob: 1.0, shake: 1.0,
+    /* В прицеле приклад лежит под щекой вровень с линией прицеливания и
+       закрывал пол-кадра серой плитой: ближняя плоскость отсекает его. */
+    near: 0.02, adsNear: 0.11
   };
+  /* Плечи рига относительно глаз: ~0,24 м ниже и чуть позади. Позы оружия
+     заданы в той же системе (viewmodel/ak.js). */
+  const SHOULDER_R = [0.18, -0.24, 0.13], SHOULDER_L = [-0.18, -0.24, 0.10];
+  /* плечи рига в прежней, нагрудной системе — для вида от третьего лица */
+  const SHOULDER_CHEST = [0.19, -0.12, 0.12];
 
   /* ---------------------------------------------------- линза бодикама -- */
   /* Проход после цветокоррекции: скос строк (rolling shutter), «рыбий
@@ -114,6 +124,8 @@
     const { scene, camera } = env;
     const assets = root().GAssets && root().GAssets.data.vm_hands;
     if (!VM || !AKA || !assets) return null;
+    VM.CONFIG.body.shoulderR = SHOULDER_R.slice();
+    VM.CONFIG.body.shoulderL = SHOULDER_L.slice();
 
     const model = AKA.createModel();
     const spec = AKA.createSpec(model);
@@ -123,17 +135,16 @@
     if (rig.flashlight.parent) rig.flashlight.parent.remove(rig.flashlight);
     if (rig.flashlight.target.parent) rig.flashlight.target.parent.remove(rig.flashlight.target);
     model.root.visible = false;                      // вместо модели — настоящий АК бойца
-    rig.root.position.set(0, 0.01, -0.05);           // линза шире, чем у рига (как в исходнике)
-    const frame = new THREE.Group();                 // «камера рига»
+    const frame = new THREE.Group();                 // «камера рига» = глаза
     frame.name = 'bodycamRig';
     frame.add(rig.root);
     scene.add(frame);
 
     const st = {
-      active: null, yawS: new Spring(P.bodyFollow, 0.95), pitchS: new Spring(2.8, 0.95),
+      active: null,
       shY: new Spring(7, 0.3), shP: new Spring(8, 0.32), shR: new Spring(6, 0.3), shYaw: new Spring(7, 0.35),
-      bobPhase: 0, bobAmp: 0, lastStep: 0, lastShot: -1, reloadWas: -1,
-      yawRate: 0, pitchRate: 0, prevY: 0, prevX: 0, fov: P.fov, t: 0,
+      moveK: 0, runK: 0, lastStep: 0, lastShot: -1, reloadWas: -1,
+      yawRate: 0, pitchRate: 0, prevY: 0, prevX: 0, t: 0,
       prevFwd: new THREE.Vector3(0, 0, -1), shift: new THREE.Vector2()
     };
     const camObj = new THREE.Object3D();             // камера для рига (позиция/поворот)
@@ -144,9 +155,8 @@
     function activate(s) {
       st.active = s;
       const c = s.ctrl;
-      st.yawS.x = c.yaw; st.yawS.v = 0;
-      st.pitchS.x = c.pitch * P.pitchFollow; st.pitchS.v = 0;
       for (const k of ['shY', 'shP', 'shR', 'shYaw']) { st[k].x = 0; st[k].v = 0; }
+      st.lastStep = Math.floor((c.stepPhase || 0) * 2);
       st.lastShot = c.lastShot; st.reloadWas = c.reload;
       st.prevY = c.yaw; st.prevX = c.pitch;
       const sm = sleeveMaterial(s.char);
@@ -154,7 +164,7 @@
       rig.reloading = false;
     }
 
-    /* Кадр управляемого бойца. mode: 'fp' — камера на груди, руки рига;
+    /* Кадр управляемого бойца. mode: 'fp' — камера на шлеме, руки рига;
        'tp' — вид со стороны, риг лишь задаёт кисти телу. Возвращает
        true, если камера поставлена. */
     function update(dt, s, mode) {
@@ -163,24 +173,37 @@
       st.t += dt;
       const aimYaw = c.yaw, aimPitch = c.pitch;
 
-      /* шаг: фаза и толчки на каждом касании */
+      /* Шаг. Фаза — та же, что у звука шагов и ног (player.js, locomotion.js):
+         ph = 2π·stepPhase, касание правой стопы при ph = 0, левой — при π.
+         Толчок камеры даётся в тот же кадр, что и звук шага. */
       const hs = c.speed || 0, moving = c.grounded === false ? 0 : hs;
-      st.bobAmp += (Math.min(moving / 2.4, 1.9) - st.bobAmp) * (1 - Math.exp(-dt * 6));
-      st.bobPhase += dt * (moving / 0.74) * Math.PI;
-      const step = Math.floor(st.bobPhase / Math.PI);
+      const PH = c.PHYS || { walk: 2.55, sprint: 4.55 };
+      const kk6 = 1 - Math.exp(-dt * 6);
+      st.moveK += (U.clamp(moving / PH.walk, 0, 1.25) - st.moveK) * kk6;
+      st.runK += (U.smoothstep(U.clamp((moving - PH.walk) / (PH.sprint - PH.walk), 0, 1)) - st.runK) * kk6;
+      const stepPh = c.stepPhase || 0, ph = stepPh * Math.PI * 2;
+      const step = Math.floor(stepPh * 2);
       if (step !== st.lastStep) {
         st.lastStep = step;
-        if (moving > 0.5) {
-          const k = P.shake * (moving > 3.8 ? 1.7 : 1);
-          st.shY.v -= 0.35 * k; st.shR.v += (step % 2 ? 1 : -1) * 0.3 * k; st.shP.v += 0.35 * k; st.shYaw.v += (step % 2 ? 1 : -1) * 0.15 * k;
+        if (moving > 0.35) {
+          const side = step % 2 ? -1 : 1;                 // чётное — правая стопа
+          const k = P.shake * U.lerp(0.55, 1.5, st.runK) * U.clamp(moving / PH.walk, 0.4, 1) * (1 - (c.ads || 0) * 0.5);
+          st.shY.v -= 0.30 * k; st.shP.v -= 0.30 * k; st.shR.v += side * 0.22 * k; st.shYaw.v += side * 0.10 * k;
         }
       }
-      const B = P.bob * (1 - (c.ads || 0) * 0.6);
-      const bobY = -Math.abs(Math.sin(st.bobPhase)) * 0.03 * st.bobAmp * B, bobX = Math.sin(st.bobPhase) * 0.02 * st.bobAmp * B;
-      const bobRoll = Math.sin(st.bobPhase) * 0.011 * st.bobAmp * B, bobPitch = Math.sin(st.bobPhase * 2) * 0.006 * st.bobAmp * B;
+      /* Голова: ниже всего сразу после касания (на бегу — в середине опоры),
+         вбок — к опорной ноге, крен туда же. Шлем гасит часть колебаний,
+         поэтому амплитуды меньше, чем у груди. */
+      const B = P.bob * st.moveK * (1 - (c.ads || 0) * 0.65);
+      const runK = st.runK;
+      const dip = 0.5 + 0.5 * Math.cos(2 * ph - U.lerp(0.35, 0.9, runK));
+      const bobY = -dip * U.lerp(0.016, 0.042, runK) * B;
+      const bobX = Math.sin(ph) * U.lerp(0.010, 0.018, runK) * B;
+      const bobRoll = Math.sin(ph) * U.lerp(0.008, 0.022, runK) * B;
+      const bobPitch = -dip * U.lerp(0.004, 0.012, runK) * B;
       const t = st.t;
       const nz = (a, b, cc) => Math.sin(t * a) * 0.5 + Math.sin(t * b + 1.3) * 0.3 + Math.sin(t * cc + 2.1) * 0.2;
-      const br = 0.0035 * P.shake * (1 + st.bobAmp * 0.8);
+      const br = 0.0025 * P.shake * (1 + st.moveK * 0.8 + runK);
 
       /* выстрел: вздрагивание камеры и отдача рига */
       if (c.lastShot !== st.lastShot) {
@@ -202,34 +225,37 @@
       } else if (c.reload < 0 && rig.reloading && st.reloadWas >= 0) rig.reloading = false;
       st.reloadWas = c.reload;
 
-      /* пружины с подшагами */
+      /* пружины толчков с подшагами */
       const n = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / n;
       for (let i = 0; i < n; i++) {
-        /* в прицеле камера берёт весь наклон взгляда: мушка по центру */
-        st.yawS.step(aimYaw, h); st.pitchS.step(aimPitch * U.lerp(P.pitchFollow, 1, U.smoothstep(c.ads || 0)), h);
         st.shY.step(0, h); st.shP.step(0, h); st.shR.step(0, h); st.shYaw.step(0, h);
       }
-      /* ствол опережает камеру не больше чем на ~31° */
-      if (st.yawS.x < aimYaw - P.maxOff) st.yawS.x = aimYaw - P.maxOff;
-      if (st.yawS.x > aimYaw + P.maxOff) st.yawS.x = aimYaw + P.maxOff;
 
+      /* объектив смотрит туда же, куда голова: без запаздывания по курсу и
+         наклону, иначе ствол и центр кадра расходятся */
       const lean = c.lean || 0;
-      const camYaw = st.yawS.x + st.shYaw.x + nz(0.9, 1.9, 3.7) * br;
-      const camPitch = st.pitchS.x + bobPitch + st.shP.x + nz(1.1, 2.3, 4.7) * br;
-      const camRoll = bobRoll + st.shR.x + nz(0.7, 1.7, 3.1) * br * 0.8 - lean * 0.25;
+      const adsK = U.smoothstep(c.ads || 0);
+      const still = 1 - adsK * 0.6;
+      const camYaw = aimYaw + (st.shYaw.x + nz(0.9, 1.9, 3.7) * br) * still;
+      const camPitch = aimPitch + (bobPitch + st.shP.x + nz(1.1, 2.3, 4.7) * br) * still;
+      const camRoll = (bobRoll + st.shR.x + nz(0.7, 1.7, 3.1) * br * 0.8) * still - lean * 0.22;
       _e.set(camPitch, camYaw, camRoll, 'YXZ');
       const camQ = _q.setFromEuler(_e);
-      const bodyQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), st.yawS.x);
+      const headQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), aimYaw);
 
       if (mode === 'fp') {
-        const chestH = U.lerp(P.chestHeight, P.crouchChest, c.crouch || 0);
-        frame.position.set(c.pos.x, c.pos.y + chestH, c.pos.z)
-          .add(_v.set(bobX + lean * 0.15, bobY + st.shY.x, -P.chestForward).applyQuaternion(bodyQ));
+        /* глаза — по скелету бойца (как F.eyePosition в game.js): на одном
+           уровне с глазами остальных бойцов */
+        const M = s.char.metrics;
+        const eyeY = U.lerp(M.eyeY, M.eyeY - (M.hipY - 0.50), c.crouch || 0);
+        frame.position.set(c.pos.x, c.pos.y + eyeY - Math.abs(lean) * 0.055, c.pos.z)
+          .add(_v.set(bobX + lean * 0.30, bobY + st.shY.x * still, -(M.headRZ + 0.012)).applyQuaternion(headQ));
       } else {
-        /* плечи рига (0,19; -0,11; 0,07 от камеры) — на плечи тела */
+        /* плечи рига — на плечи тела */
         const sR = s.char.bone('shoulderR').getWorldPosition(new THREE.Vector3());
         const sL = s.char.bone('shoulderL').getWorldPosition(new THREE.Vector3());
-        frame.position.copy(sR.add(sL).multiplyScalar(0.5)).sub(_v.set(0, -0.11, 0.07).applyQuaternion(camQ));
+        const oy = -0.11 + (SHOULDER_R[1] - SHOULDER_CHEST[1]), oz = 0.07 + (SHOULDER_R[2] - SHOULDER_CHEST[2]);
+        frame.position.copy(sR.add(sL).multiplyScalar(0.5)).sub(_v.set(0, oy, oz).applyQuaternion(camQ));
       }
       frame.quaternion.copy(camQ);
       frame.updateMatrixWorld(true);
@@ -254,7 +280,7 @@
         get aimPitch() { return aimPitch; }, set aimPitch(v) {},
         ads, sprint: spr,
         fatigue: 1 - (c.stamina / (c.PHYS ? c.PHYS.staminaMax : 7.2)),
-        grounded: c.grounded !== false, moveBlend: Math.min(hs / 2.4, 2), speed: hs, stepPhase: st.bobPhase,
+        grounded: c.grounded !== false, moveBlend: 1 + runK, speed: hs, stepPhase: ph,
         /* на бегу оружие прижато к груди и не водится за взглядом */
         offsetYaw: wrapAng(aimYaw - camYaw) * (1 - spr * 0.7), offsetPitch: wrapAng(aimPitch - camPitch) * (1 - spr * 0.9)
       };
@@ -266,8 +292,11 @@
       if (mode === 'fp') {
         camera.position.copy(frame.position);
         camera.quaternion.copy(frame.quaternion);
-        const fov = U.lerp(P.fov, P.adsFov, ads);
-        if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
+        const fov = U.lerp(U.lerp(P.fov, P.sprintFov, spr), P.adsFov, ads);
+        const near = U.lerp(P.near, P.adsNear, U.smoothstep(U.clamp((ads - 0.55) / 0.4, 0, 1)));
+        if (Math.abs(camera.fov - fov) > 0.01 || camera.near !== near) {
+          camera.fov = fov; camera.near = near; camera.updateProjectionMatrix();
+        }
         camera.updateMatrixWorld(true);
       }
       return true;
@@ -293,6 +322,8 @@
     return {
       rig, spec, frame, update, measureShift, handTargets, P,
       hide() { rig.root.visible = false; },
+      /* вне вида от первого лица ближняя плоскость — обычная */
+      resetNear() { if (camera.near !== P.near) { camera.near = P.near; camera.updateProjectionMatrix(); } },
       get lensAmount() { return st.lens || 0; }
     };
   }
