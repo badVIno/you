@@ -261,8 +261,11 @@
         if (samples < 2 && A.SMAAPass && !DEV) { smaa = new A.SMAAPass(512, 512); composer.addPass(smaa); }
         const grade = new A.ShaderPass(GRADE_SHADER);
         composer.addPass(grade);
+        /* линза бодикама (game/bodycam.js): включается от первого лица */
+        const lens = root.GBodycam ? new A.ShaderPass(root.GBodycam.LENS_SHADER) : null;
+        if (lens) { lens.enabled = false; composer.addPass(lens); }
         const post = {
-          composer, gtao, grade, smaa,
+          composer, gtao, grade, smaa, lens,
           apply(L) {
             if (gtao) gtao.blendIntensity = L.ao;
             const u = grade.uniforms;
@@ -274,6 +277,10 @@
             composer.setPixelRatio(renderer.getPixelRatio());
             composer.setSize(w, h);
             grade.uniforms.uRes.value.set(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
+            if (lens) {
+              lens.uniforms.uRes.value.set(w * renderer.getPixelRatio(), h * renderer.getPixelRatio());
+              lens.uniforms.uAspect.value = w / h;
+            }
           }
         };
         post.resize(window.innerWidth, window.innerHeight);
@@ -657,7 +664,7 @@
     }
 
     const G = startLoop({
-      THREE, renderer, scene, camera, world, fx, audio, squad, sun, sunDir, renderFrame,
+      THREE, renderer, scene, camera, world, fx, audio, squad, sun, sunDir, renderFrame, getPost: () => POST,
       S, input, ui, toast, active, updateFree, updateUse, syncAmmoCap,
       getAsm: () => ATTACH_ASM, setAsm: (v) => { ATTACH_ASM = v; },
       setCustOpen: (v) => { custOpen = v; }, isCustOpen: () => custOpen,
@@ -893,13 +900,13 @@
       return out.add(_sl.a.set(G.offset[0] * side, G.offset[1], G.offset[2]).applyQuaternion(rel));
     }
     /* Точка правого запястья в системе w.root — та же, что ставит риг. */
+    const AK_RGRIP = root.GAK ? root.GAK.createSpec(root.GAK.createModel()).rightGrip : null;
     function wristLocal(s, out) {
-      const H = root.GHands, w = s.gun;
-      if (!H) return gripLocal(w, RIG.GRIP.right, 1, out);
-      const rest = s.char.rest, mw = rest.middleR1, ww = rest.wristR;
-      w.root.updateMatrixWorld(true);
-      const hp = H.handPose(THREE, H.GRIPS.pistol, 1, w.gun, [mw[0] - ww[0], mw[1] - ww[1], mw[2] - ww[2]], _sl.hp || (_sl.hp = {}));
-      return out.copy(hp.pos).applyMatrix4(_sl.m.copy(w.root.matrixWorld).invert());
+      const w = s.gun;
+      if (!AK_RGRIP || !s.char.hands) return gripLocal(w, RIG.GRIP.right, 1, out);
+      /* запястье кисти GLB на рукоятке (хват рига) */
+      const gw = root.GAK.rigGunWorld(w, new THREE.Matrix4()).multiply(AK_RGRIP);
+      return out.setFromMatrixPosition(gw).applyMatrix4(_sl.m.copy(w.root.matrixWorld).invert());
     }
     function slingCarry(s, spec) {
       const SP = spec || SLING;
@@ -1353,6 +1360,23 @@
       S, input, ui, toast, active, updateFree, updateUse, syncAmmoCap } = C;
     const clamp = U.clamp;
 
+    /* Нагрудная камера и руки рига от первого лица (game/bodycam.js). */
+    const BC = root.GBodycam ? root.GBodycam.create({ scene, camera }) : null;
+    const AKA = root.GAK;
+    const NPC_SPEC = BC ? BC.spec : null;
+    const _gw = new THREE.Matrix4();
+    /* Кисти GLB у бойцов со стороны: хват из спеки рига на их АК. */
+    function npcHands(s) {
+      if (!NPC_SPEC || !s.char.hands) { s.rig.handTargets = null; return; }
+      const H = s.rig.handTargets || (s.rig.handTargets = { R: new THREE.Matrix4(), L: new THREE.Matrix4() });
+      AKA.rigGunWorld(s.gun, _gw);
+      H.R.multiplyMatrices(_gw, NPC_SPEC.rightGrip);
+      H.L.multiplyMatrices(_gw, NPC_SPEC.leftGrip);
+      s.rig.handPoses = { R: NPC_SPEC.hands.indexed, L: NPC_SPEC.hands.support };
+    }
+    const bodycamMode = (i) => (BC && i === S.activeIdx ? (S.tp || S.spectate ? 'tp' : 'fp') : null);
+    let lensAmt = 0;
+
     /* Панель модулей (TAB) из исходного файла оружия. */
     ATTACH_STATE.apply = (slotKey, moduleKey) => {
       ATTACH_STATE.ui && ATTACH_STATE.ui.markStats();
@@ -1406,6 +1430,12 @@
         return;
       }
       const a = active();
+      /* от первого лица камеру уже поставил бодикам */
+      if (a && BC && !S.tp) {
+        camRig.pos.copy(camera.position); camRig.quat.copy(camera.quaternion);
+        camRig.fov = camera.fov; camRig.blend = 1; camRig.tp = 0;
+        return;
+      }
       if (a) {
         const c = a.ctrl;
         const eye = F.eyePosition(a);
@@ -1575,11 +1605,24 @@
         const isActive = i === S.activeIdx;
         const pose = F.poseSoldier(s, dt, isActive, t);
         s.char.root.updateMatrixWorld(true);
-        F.placeWeapon(s, dt, isActive, camera.position, camera.quaternion, pose);
+        const mode = bodycamMode(i);
+        /* от первого лица тело скрыто: видны руки рига и оружие */
+        s.char.root.visible = mode !== 'fp';
+        if (mode) {
+          s.ctrl.ready = U.damp(s.ctrl.ready === undefined ? 1 : s.ctrl.ready, 1, 6, dt);
+          BC.update(dt, s, mode);
+          if (mode === 'tp') {
+            const H = BC.handTargets({});
+            s.rig.handTargets = { R: H.R, L: H.L };
+            s.rig.handPoses = { R: H.poseR, L: H.poseL };
+          }
+        } else {
+          F.placeWeapon(s, dt, isActive, camera.position, camera.quaternion, pose);
+          npcHands(s);
+        }
+        if (mode === 'fp') continue;
         /* руки подводятся к уже размещённому оружию */
         s.rig.triggerCurl = triggerCurlFor(s);
-        /* Риг должен знать, целится ли боец: от этого зависит, насколько
-           далеко опорная кисть может съехать по цевью (см. solveArms). */
         s.rig.adsAmount = s.ctrl.ads;
         s.rig.readyAmount = U.smoothstep(s.ctrl.ready === undefined ? 1 : s.ctrl.ready);
         s.rig.fingerEvery = isActive ? 1 : 3;
@@ -1588,6 +1631,19 @@
 
       /* 5. камера */
       updateCamera(dt);
+      /* линза бодикама — только от первого лица */
+      const post = C.getPost && C.getPost();
+      /* включается плавно, выключается сразу — иначе при переходе на вид
+         со стороны кадр смазывается «хвостом» линзы */
+      const lensOn = !!(a && BC && !S.tp && !S.spectate);
+      lensAmt = lensOn ? U.damp(lensAmt, 1, 10, dt) : 0;
+      if (post && post.lens) {
+        const lu = post.lens.uniforms;
+        post.lens.enabled = lensAmt > 0.005;
+        lu.uAmt.value = lensAmt;
+        lu.uTime.value = t;
+        if (post.lens.enabled) lu.uShift.value.copy(BC.measureShift());
+      }
       updateSelfVisibility();
       updateSun();
 
@@ -1786,6 +1842,8 @@
       return true;
     };
     window.__GAME.pause = (on) => { S.paused = !!on; return S.paused; };
+    window.__GAME.bodycam = BC;
+    window.__GAME.setTP = (on) => { S.tp = !!on; return S.tp; };
 
     window.__GAME.disembody = () => { C.disembodyFn(); return S.activeIdx; };
     window.__GAME.setPose = (o) => {

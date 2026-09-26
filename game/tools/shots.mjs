@@ -38,7 +38,7 @@ page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('[' + m.type() + ']', m.text()); });
 async function load() {
   const t0 = Date.now();
-  await page.goto(`http://localhost:${port}/${process.env.PAGE || 'start.html'}`);
+  await page.goto(`http://localhost:${port}/${process.env.PAGE || 'start.html'}`, { timeout: 180000 });
   await page.waitForFunction(() => window.__GAME, null, { timeout: 240000 });
   console.log('game ready in', ((Date.now() - t0) / 1000).toFixed(1), 's');
   await page.addStyleTag({ content: '#start{display:none!important}' + (process.env.HUD ? '' : '#hud,#prompt,#toast{display:none!important}') });
