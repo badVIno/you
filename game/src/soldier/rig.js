@@ -12,10 +12,10 @@
    отдаются в ствол.
    ========================================================================== */
 (function (root, factory) {
-  const R = factory(root.GUtil, root.GSkel, root.GHands);
+  const R = factory(root.GUtil, root.GSkel);
   if (typeof module !== 'undefined' && module.exports) module.exports = R;
   else root.GRig = R;
-})(typeof self !== 'undefined' ? self : this, function (U, SK, HANDS) {
+})(typeof self !== 'undefined' ? self : this, function (U, SK) {
   'use strict';
 
   /* ==================================================== two-bone IK ====== */
@@ -299,7 +299,85 @@
     };
   }
 
+  /* Кисти GLB (viewmodel/ak.js): запястье ставится в кисть рига, локоть
+     выбирается так, чтобы предплечье шло вдоль кисти — тогда кисть не
+     выламывается в запястье. handTargets — мировые матрицы кистей рига,
+     handPoses — позы пальцев рига. */
+  Rig.prototype.solveArmsGLB = function () {
+    const THREE = this.THREE, AKA = typeof self !== 'undefined' ? self.GAK : null;
+    const rest = this.char.rest;
+    const chestQ = this.bone('chest').getWorldQuaternion(new THREE.Quaternion());
+    const chestQi = chestQ.clone().invert();
+    const kr = this.readyAmount === undefined ? 1 : U.clamp01(this.readyAmount);
+    const ka = U.clamp01(this.adsAmount || 0);
+    const pose = mixArm(mixArm(ARM.sling, ARM.ready, kr), ARM.ads, ka);
+    this.gripTarget = this.gripTarget || {};
+    this.armDebug = this.armDebug || {};
+    const P = new THREE.Vector3(), Q = new THREE.Quaternion(), Sc = new THREE.Vector3();
+    for (const side of [1, -1]) {
+      const SS = side > 0 ? 'R' : 'L';
+      this.handTargets[SS].decompose(P, Q, Sc);
+      const clav = this.bone('clav' + SS), shoulder = this.bone('shoulder' + SS);
+      const elbow = this.bone('elbow' + SS), wrist = this.bone('wrist' + SS);
+      const dist3 = (a, b) => Math.hypot(rest[a][0] - rest[b][0], rest[a][1] - rest[b][1], rest[a][2] - rest[b][2]);
+      const lenA = dist3('shoulder' + SS, 'elbow' + SS), lenB = dist3('elbow' + SS, 'wrist' + SS);
+      {
+        const cp = clav.getWorldPosition(new THREE.Vector3());
+        const d = P.clone().sub(cp).applyQuaternion(chestQi).normalize();
+        clav.rotation.y += side * U.clamp(Math.max(0, -d.z) * pose.clav[0], 0, 0.26);
+        clav.rotation.z += side * U.clamp(d.y * pose.clav[1] + 0.02, -0.08, 0.12);
+        clav.updateMatrixWorld(true);
+      }
+      const S = shoulder.getWorldPosition(new THREE.Vector3());
+      const toT = P.clone().sub(S);
+      const d = U.clamp(toT.length(), Math.abs(lenA - lenB) + 1e-3, (lenA + lenB) * 0.999);
+      const dir = toT.normalize();
+      const cosA = U.clamp((lenA * lenA + d * d - lenB * lenB) / (2 * lenA * d), -1, 1);
+      const sinA = Math.sqrt(1 - cosA * cosA);
+      /* локоть на окружности решений — ближе всего к продолжению кисти */
+      const prox = new THREE.Vector3(0, 0, 1).applyQuaternion(Q);
+      const Ed = P.clone().addScaledVector(prox, lenB);
+      const Cc = S.clone().addScaledVector(dir, cosA * lenA);
+      const perp = Ed.sub(Cc); perp.addScaledVector(dir, -perp.dot(dir));
+      const L = pose[SS];
+      const hint = new THREE.Vector3(L[0] * side, L[1], L[2]).applyQuaternion(chestQ);
+      hint.addScaledVector(dir, -hint.dot(dir));
+      if (hint.lengthSq() > 1e-8) hint.normalize();
+      /* Основа — подсказка позы (локоть вниз-наружу); продолжение кисти
+         подмешивается, только пока не поднимает локоть: иначе «на ремне»
+         локоть задирался выше плеча. */
+      const upC = new THREE.Vector3(0, 1, 0).applyQuaternion(chestQ);
+      let k = 0;
+      if (perp.lengthSq() > 1e-8) {
+        perp.normalize();
+        k = 0.6 * U.clamp01(1 - Math.max(0, perp.dot(upC) - hint.dot(upC)) / 0.5);
+      }
+      const pdir = hint.clone().multiplyScalar(1 - k).addScaledVector(perp, k);
+      pdir.addScaledVector(dir, -pdir.dot(dir));
+      if (pdir.lengthSq() < 1e-8) pdir.set(0, -1, 0);
+      pdir.normalize();
+      const E = S.clone().addScaledVector(dir, cosA * lenA).addScaledVector(pdir, sinA * lenA);
+      const Wp = S.clone().addScaledVector(dir, d);
+      const up = E.clone().sub(S).normalize();
+      const fo = Wp.clone().sub(E).normalize();
+      const hinge = new THREE.Vector3().crossVectors(pdir, dir).normalize().multiplyScalar(side);
+      setWorldBasis(THREE, shoulder, up.clone().multiplyScalar(side), hinge);
+      setWorldBasis(THREE, elbow, fo.clone().multiplyScalar(side), hinge);
+      const want = AKA.wristQuat(Q, SS, new THREE.Quaternion());
+      wrist.quaternion.copy(elbow.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(want));
+      wrist.updateMatrixWorld(true);
+      const ft = this.bone('foreTwist' + SS), at = this.bone('armTwist' + SS);
+      const X = new THREE.Vector3(1, 0, 0);
+      if (ft) { ft.quaternion.setFromAxisAngle(X, U.clamp(twistX(wrist.quaternion), -1.75, 1.75)); ft.updateMatrixWorld(true); }
+      if (at) { at.quaternion.setFromAxisAngle(X, -twistX(shoulder.quaternion)); at.updateMatrixWorld(true); }
+      this.armDebug[SS] = { elbow: E, wrist: Wp, hint: pdir };
+      this.gripTarget[SS] = P.clone();
+      if (this.handPoses && this.handPoses[SS]) this.char.hands[SS].setPose(this.handPoses[SS]);
+    }
+  };
+
   Rig.prototype.solveArms = function (weapon) {
+    if (this.char.hands && this.handTargets) return this.solveArmsGLB();
     const THREE = this.THREE;
     const W = weapon;                       // Object3D оружия (система АК)
     W.updateMatrixWorld(true);
@@ -312,24 +390,13 @@
     const rest = this.char.rest;
     this.gripTarget = this.gripTarget || {};
     this.armDebug = this.armDebug || {};
-    this._hp = this._hp || {};
 
     for (const side of [1, -1]) {
       const SS = side > 0 ? 'R' : 'L';
       const G = side > 0 ? GRIP.right : mixGrip(mixGrip(GRIP.leftSling, GRIP.left, kr), GRIP.leftAds, ka);
-      /* Хват по форме кисти (hands.js): запястье ставится так, чтобы ладонь
-         легла на рукоятку или цевьё. Табличные смещения — запасной путь. */
-      const HG = HANDS ? (side > 0 ? HANDS.GRIPS.pistol : HANDS.mixGrip(HANDS.GRIPS.under, HANDS.GRIPS.underAds, ka)) : null;
-      let target, hp = null;
-      if (HG) {
-        const mw = rest['middle' + SS + '1'], ww = rest['wrist' + SS];
-        hp = HANDS.handPose(THREE, HG, side, W, [mw[0] - ww[0], mw[1] - ww[1], mw[2] - ww[2]], this._hp[SS] || (this._hp[SS] = {}));
-        target = hp.pos.clone();
-      } else {
-        const node = W.getObjectByName(G.node) || W;
-        target = node.getWorldPosition(new THREE.Vector3())
-          .add(new THREE.Vector3(G.offset[0] * side, G.offset[1], G.offset[2]).applyQuaternion(wq));
-      }
+      const node = W.getObjectByName(G.node) || W;
+      const target = node.getWorldPosition(new THREE.Vector3())
+        .add(new THREE.Vector3(G.offset[0] * side, G.offset[1], G.offset[2]).applyQuaternion(wq));
 
       const clav = this.bone('clav' + SS), shoulder = this.bone('shoulder' + SS);
       const elbow = this.bone('elbow' + SS), wrist = this.bone('wrist' + SS);
@@ -392,18 +459,14 @@
       setWorldBasis(THREE, elbow, fo.clone().multiplyScalar(side), hinge);
 
       /* ориентация кисти: пальцы вдоль fingerDir оружия, Y — от ладони */
-      let want;
-      if (hp) want = hp.quat.clone();
-      else {
-        const ex = new THREE.Vector3(G.fingerDir[0] * side, G.fingerDir[1], G.fingerDir[2]).normalize().applyQuaternion(wq);
-        const ey = new THREE.Vector3(G.palmDir[0] * side, G.palmDir[1], G.palmDir[2]).normalize().applyQuaternion(wq);
-        ey.addScaledVector(ex, -ey.dot(ex));
-        if (ey.lengthSq() < 1e-8) ey.set(0, 1, 0);
-        ey.normalize();
-        const ez = new THREE.Vector3().crossVectors(ex, ey);
-        want = new THREE.Quaternion().setFromRotationMatrix(
-          new THREE.Matrix4().makeBasis(ex.multiplyScalar(side), ey, ez.multiplyScalar(side)));
-      }
+      const ex = new THREE.Vector3(G.fingerDir[0] * side, G.fingerDir[1], G.fingerDir[2]).normalize().applyQuaternion(wq);
+      const ey = new THREE.Vector3(G.palmDir[0] * side, G.palmDir[1], G.palmDir[2]).normalize().applyQuaternion(wq);
+      ey.addScaledVector(ex, -ey.dot(ex));
+      if (ey.lengthSq() < 1e-8) ey.set(0, 1, 0);
+      ey.normalize();
+      const ez = new THREE.Vector3().crossVectors(ex, ey);
+      const want = new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(ex.multiplyScalar(side), ey, ez.multiplyScalar(side)));
       wrist.quaternion.copy(elbow.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(want));
       wrist.updateMatrixWorld(true);
 
@@ -424,26 +487,11 @@
       }
       this.armDebug[SS] = { elbow: E, wrist: Wp, hint: pdir };
 
-      /* Пальцы замыкаются на поверхность оружия. Указательный правой руки
-         лежит вдоль коробки (дисциплина пальца) или на спуске. Бойцам вне
-         управления решатель запускается раз в несколько кадров. */
-      if (HG) {
-        const tc = this.triggerCurl;
-        const mode = side > 0 ? (tc === undefined || tc < 0.5 ? 'straight' : 'trigger') : 'wrap';
-        this._fing = this._fing || {};
-        this._fingTick = this._fingTick || { R: 0, L: 0 };
-        const every = this.fingerEvery || 3;
-        const tick = this._fingTick[SS]++;
-        const prev = this._fing[SS];
-        if (!prev || every <= 1 || tick % every === 0 || prev.mode !== mode)
-          this._fing[SS] = Object.assign(HANDS.solveFingers(THREE, this, side, HG, W, { index: mode, trigger: tc }), { mode });
-        else HANDS.applyAngles(this, side, prev);
-      } else {
-        const trig = side > 0 ? this.triggerCurl : undefined;
-        this.thumbAmount = G.thumb;
-        this.thumbBase = G.thumbBase || [0.55, 0.30];
-        curlFingers(this, side, G.curl, trig);
-      }
+      /* пальцы обхватывают (запасной путь без кистей GLB) */
+      const trig = side > 0 ? this.triggerCurl : undefined;
+      this.thumbAmount = G.thumb;
+      this.thumbBase = G.thumbBase || [0.55, 0.30];
+      curlFingers(this, side, G.curl, trig);
     }
   };
 
