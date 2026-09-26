@@ -592,6 +592,7 @@
     function disembody() {
       const a = active();
       if (!a) return;
+      if (audio.motion) audio.motion(0);
       /* Свободная камера появляется там, где стоял боец, чуть в стороне. */
       const f = S.free;
       f.yaw = a.ctrl.yaw;

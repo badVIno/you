@@ -268,8 +268,19 @@
           const hard = false;
           const vol = U.lerp(0.55, 1.15, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.crouch * 0.45);
           const run = U.clamp01((P.speed - PHYS.walk) / (PHYS.sprint - PHYS.walk));
-          /* звук — только у управляемого бойца: камера и шаги на одной фазе */
-          if (audio && active) audio.step(hard, vol, run);
+          /* звук — только у управляемого бойца: камера и шаги на одной фазе;
+             касание при stepPhase ≈ 0 — правая нога, ≈ 0,5 — левая */
+          const foot = Math.floor(P.stepPhase * 2) % 2 === 0 ? 1 : -1;
+          if (audio && active) audio.step(hard, vol, run, foot);
+          /* на бегу дыхание ложится на шаги: вдох на два шага, выдох на два */
+          if (audio && active && run > 0.5) {
+            P._stepN = (P._stepN || 0) + 1;
+            if (P._stepN % 2 === 0) {
+              P._inhale = !P._inhale;
+              audio.breath(U.lerp(0.45, 1, 1 - P.stamina / PHYS.staminaMax), P._inhale);
+              P._breathAcc = 0;
+            }
+          }
           /* толчок в оружие от шага — то самое ощущение веса */
           P.recoil.v += U.lerp(0.10, 0.34, U.clamp01(P.speed / PHYS.sprint)) * (1 - P.ads * 0.55);
           P.lastStepSide *= -1;
@@ -283,10 +294,18 @@
       /* дыхание: после бега — тяжёлое */
       P.breathT += dt * U.lerp(1.0, 2.4, 1 - P.stamina / PHYS.staminaMax);
       if (audio && active) {
-        const need = P.stamina < PHYS.staminaMax * 0.55;
+        /* вне бега — по таймеру: спокойно и тихо, после бега — часто и
+           громко, пока не восстановится выносливость; вдох и выдох чередуются */
+        const fat = 1 - P.stamina / PHYS.staminaMax;
+        const running = moving && P.speed > PHYS.walk + 0.5 * (PHYS.sprint - PHYS.walk);
         P._breathAcc = (P._breathAcc || 0) + dt;
-        const period = need ? U.lerp(0.95, 1.9, P.stamina / PHYS.staminaMax) : 4.2;
-        if (P._breathAcc > period) { P._breathAcc = 0; audio.breath(need); }
+        const half = fat > 0.15 ? U.lerp(1.2, 0.5, fat) : 1.9;
+        if (!running && P._breathAcc > half) {
+          P._breathAcc = 0;
+          P._inhale = !P._inhale;
+          audio.breath(fat > 0.15 ? U.lerp(0.3, 1, fat) : 0.14, P._inhale);
+        }
+        if (audio.motion) audio.motion(P.grounded ? P.speed / PHYS.sprint : 0);
       }
     };
 
