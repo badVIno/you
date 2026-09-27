@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<!-- Проверка библиотеки оружия: полные модели (верх) и облегчённые (низ) с точками хвата.
+     ?id=akm — одно оружие крупно; &view=top — вид сверху; &cfg=<json> — конфигурация. -->
+<html lang="ru"><head><meta charset="utf-8"><title>SIGNUM — модели оружия</title>
+<style>html,body{margin:0;height:100%;background:#1a1d21;color:#ddd;font:12px system-ui;overflow:hidden}#lg{position:fixed;left:8px;top:6px}#lg b{padding:0 6px}</style>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.166.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.166.1/examples/jsm/"}}</script>
+</head><body><div id="lg"><b style="color:#f33">grip</b><b style="color:#39f">support</b><b style="color:#fd2">muzzle</b><b style="color:#3f6">eye</b><b style="color:#f3f">butt</b><b style="color:#3ff">magwell</b> <span id="st"></span></div>
+<script type="module">
+import * as THREE from 'three';
+import { buildWeapon, buildWeaponLite, WEAPON_IDS } from '../lib/weapons/index.js';
+const q = new URLSearchParams(location.search);
+const ids = q.get('id') ? [q.get('id')] : WEAPON_IDS;
+const top = q.get('view') === 'top';
+const cfg = q.get('cfg') ? JSON.parse(q.get('cfg')) : null;
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setSize(innerWidth, innerHeight); r.setPixelRatio(1); document.body.appendChild(r.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x2a2f35);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444450, 2.2));
+const dl = new THREE.DirectionalLight(0xffffff, 2.5); dl.position.set(2, 3, 4); scene.add(dl);
+const COLORS = { grip: 0xff3333, support: 0x3399ff, muzzle: 0xffdd22, eye: 0x33ff66, butt: 0xff33ff, magwell: 0x33ffff };
+const cols = ids.length > 1 ? 4 : 1, cell = 1.5;
+const rows = ids.length > 1 ? 4 : 2;
+const out = [];
+for (let i = 0; i < ids.length; i++) {
+  for (const lite of [false, true]) {
+    const t0 = performance.now();
+    const w = lite ? await buildWeaponLite(ids[i], cfg) : await buildWeapon(ids[i], cfg);
+    const ms = Math.round(performance.now() - t0);
+    const g = new THREE.Group();
+    g.add(w.root);
+    const rad = ids.length > 1 ? 0.012 : 0.006;
+    for (const [k, v] of Object.entries(w.anchors)) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(rad, 12, 8), new THREE.MeshBasicMaterial({ color: COLORS[k], depthTest: false }));
+      m.renderOrder = 10; m.position.copy(v); g.add(m);
+    }
+    const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints([w.anchors.eye, w.anchors.eye.clone().add(new THREE.Vector3(0, 0, -1.2))]), new THREE.LineBasicMaterial({ color: 0x33ff66, depthTest: false }));
+    ln.renderOrder = 9; g.add(ln);
+    // вид сбоку справа: ствол влево по экрану → поворачиваем -Z в -X
+    g.rotation.y = top ? 0 : -Math.PI / 2;
+    if (top) g.rotation.x = Math.PI / 2;
+    const col = i % cols, row = Math.floor(i / cols) * 2 + (lite ? 1 : 0);
+    g.position.set((col - (cols - 1) / 2) * cell, ((rows - 1) / 2 - row) * (ids.length > 1 ? 0.55 : 0.6), 0);
+    scene.add(g);
+    out.push(`${w.id}${lite ? '·lite' : ''} ${w.info.meshes}m ${w.info.tris}t ${ms}ms`);
+  }
+}
+const W = ids.length > 1 ? cols * cell : 1.5, H = W * innerHeight / innerWidth;
+const cam = new THREE.OrthographicCamera(-W / 2, W / 2, H / 2, -H / 2, -10, 10);
+cam.position.set(0, 0, 5); cam.lookAt(0, 0, 0);
+r.render(scene, cam);
+document.getElementById('st').textContent = out.join(' | ');
+window.__done = out;
+</script></body></html>

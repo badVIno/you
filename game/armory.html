@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SIGNUM — Оружейная</title>
+<link rel="stylesheet" href="lib/ui.css">
+<link rel="stylesheet" href="lib/armory.css">
+</head>
+<body>
+<iframe id="range" title="Оружейный полигон" allow="autoplay; fullscreen"></iframe>
+<div id="veil" class="veil on"><div class="spin"></div><span>Загрузка полигона…</span></div>
+
+<div class="shell">
+  <header class="side-head">
+    <button id="back" class="ar-back sg-glass" title="Назад в лобби — всё сохранится" aria-label="Назад">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M20 12H5M11 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="ar-title"><b>ОРУЖЕЙНАЯ</b><span>снаряжение генерала</span></div>
+  </header>
+  <div id="generals" class="generals" role="radiogroup" aria-label="Генерал"></div>
+
+  <nav id="wlist" class="wlist sg-glass" aria-label="Оружие">
+    <div class="wl-h">Оружие</div>
+    <div id="witems"></div>
+  </nav>
+
+  <section id="slotbar" class="slotbar sg-glass" aria-label="Слоты снаряжения">
+    <div class="sb-top">
+      <div class="sb-t">Снаряжение <em>6 слотов</em></div>
+      <div id="summary" class="sb-sum"></div>
+    </div>
+    <div class="sb-row">
+      <div id="slots" class="slots"></div>
+      <div class="sb-act">
+        <button id="take" class="ar-take">Взять в снаряжение</button>
+        <div class="presets" title="Быстрые шаблоны снаряжения">
+          <button data-preset="assault" title="основное + 3×120 патр. + М67 + М84">Штурм</button>
+          <button data-preset="universal" title="основное + 2×120 патр. + Glock + патроны + М67">Универсал</button>
+          <button data-preset="ammo" title="основное + 5×120 патр.">Боезапас</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="pop" class="pop sg-glass" hidden></div>
+<div id="toast" class="ar-toast"></div>
+
+<script type="module" src="lib/armory.js"></script>
+</body>
+</html>

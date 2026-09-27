@@ -170,6 +170,18 @@ body.nv canvas{filter:grayscale(1) sepia(1) hue-rotate(52deg) saturate(2.6) brig
   .ui.show-mods .help{right:8px}
 }
 
+/* signum:embed */
+body.embed{--el:292px;--et:120px}
+body.embed .col-left{visibility:hidden;pointer-events:none;width:calc(var(--el) - 16px)!important;right:auto!important}
+body.embed .mods{top:var(--et);bottom:16px;width:340px}
+body.embed .bottom{left:var(--el);right:372px;gap:8px}
+body.embed .ammo{min-width:0;padding:8px 12px;gap:10px}
+body.embed .a-n{font-size:24px}
+body.embed .bar{padding:6px;gap:4px}
+body.embed .bar .btn{height:30px;padding:0 9px;font-size:11.5px}
+body.embed .help,body.embed .ui.show-mods .help{right:372px;bottom:72px}
+body.embed .toast,body.embed .ads-hint{top:calc(var(--et) + 4px)}
+body.embed .shot-info{top:calc(var(--et) + 48px)}
 </style>
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.166.1/build/three.module.js","three/addons/":"https://unpkg.com/three@0.166.1/examples/jsm/"}}</script>
 </head>
@@ -7083,6 +7095,15 @@ async function boot(def, lib) {
       localStorage.setItem(LS, JSON.stringify(cfg));
     } catch (e) {
     }
+    signumPost();
+  }
+  // signum:embed: сообщаем оболочке SIGNUM текущую сборку
+  function signumPost() {
+    if (parent === window) return;
+    try {
+      parent.postMessage({ type: "gunsmith:cfg", weapon: def.id, cfg, stats: { ...st.stats, mag: st.cap } }, "*");
+    } catch (e) {
+    }
   }
   function resetCfg() {
     applyConfig(def.defaults, { init: true });
@@ -7585,6 +7606,19 @@ async function boot(def, lib) {
   poseSelector(true);
   ui = new UI(app);
   ui.refresh();
+  // signum:embed
+  if (qs.get("embed") === "1") {
+    document.body.classList.add("embed");
+    for (const k of ["el", "et"]) if (qs.get(k)) document.body.style.setProperty("--" + k, (+qs.get(k) || 0) + "px");
+  }
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (!d || d.type !== "gunsmith:set" || !d.cfg) return;
+    ui.open = null;
+    applyConfig({ ...def.defaults, ...d.cfg });
+    saveCfg();
+  });
+  signumPost();
   const setView = (v, zoom = 1) => {
     const t = controls.target, dd = f.size / 1e3 * 1.25 / zoom;
     const V = { right: [0, 0.05, 1], left: [0, 0.05, -1], top: [0, 1, 1e-3], front: [1, 0.1, 0.02], back: [-1, 0.1, 0.02], iso: [-0.5, 0.35, 0.8], isoL: [-0.5, 0.35, -0.8], under: [0, -1, 1e-3] }[v] || [-0.15, 0.13, 1];
