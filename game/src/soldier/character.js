@@ -14,10 +14,10 @@
    ========================================================================== */
 (function (root, factory) {
   const C = factory(root.GUtil, root.GBuf, root.GSkel, root.GSoldier, root.GTex,
-    root.GBody, root.GCloth, root.GGear, root.GAK);
+    root.GBody, root.GCloth, root.GGear, root.GHands);
   if (typeof module !== 'undefined' && module.exports) module.exports = C;
   else root.GChar = C;
-})(typeof self !== 'undefined' ? self : this, function (U, B, SK, S, T, BODYMOD, CLOTH, GEAR, AKA) {
+})(typeof self !== 'undefined' ? self : this, function (U, B, SK, S, T, BODYMOD, CLOTH, GEAR, HANDS) {
   'use strict';
 
   /* ---------------------------------------------------------- пресеты --- */
@@ -454,9 +454,31 @@
   }
 
   /* ------------------------------------------------------------ сборка -- */
-  function build(THREE, key) {
-    const P = PRESETS[key];
-    if (!P) throw new Error('нет пресета бойца: ' + key);
+  /* Варианты формы для ботов: та же модель, что у генералов, с другими
+     полями пресета. Разрешённые поля — VARIANT_KEYS; остальное игнорируется. */
+  const VARIANT_KEYS = ['camo', 'head', 'mask', 'patchCol', 'gearCol', 'hardCol', 'maskCol', 'bootCol',
+    'gloveCol', 'gloveHardCol', 'kneePads', 'padCol', 'seed', 'name', 'callsign'];
+  const CAMOS = ['delta_green', 'delta_grey', 'alpha_black', 'alpha_cadpat', 'flora', 'woodland', 'olive', 'coyote', 'urban'];
+  function variant(key, opts) {
+    const base = PRESETS[key];
+    if (!base) throw new Error('нет пресета бойца: ' + key);
+    if (!opts) return base;
+    const P = Object.assign({}, base);
+    for (const k of VARIANT_KEYS) if (opts[k] !== undefined && opts[k] !== null) P[k] = opts[k];
+    if (!CAMOS.includes(P.camo)) P.camo = base.camo;
+    if (P.head !== 'helmet' && P.head !== 'boonie') P.head = base.head;
+    P.mask = !!P.mask;
+    return P;
+  }
+  /* Материалы одного варианта общие для всех его бойцов (боты): текстуры и
+     шейдеры не плодятся. Материалы не зависят от головы и маски. */
+  const matCache = new Map();
+  const matKey = (P) => JSON.stringify([P.camo, P.seed, P.faction, P.gearCol, P.hardCol, P.maskCol, P.bootCol,
+    P.gloveCol, P.gloveHardCol, P.patchCol, P.padCol]);
+  const gearCache = new Map();
+
+  function build(THREE, key, opts) {
+    const P = variant(key, opts);
 
     const pack = packData();
     const M = pack ? SK.metricsFromJoints(pack.hdr.joints, P.height) : SK.metrics(P.height, P.build);
@@ -468,12 +490,16 @@
        на реальной форме. */
     P.camoTile = 0.42;
     const geos = pack ? packGeometry(THREE, pack, P, BI) : soldierGeometry(THREE, P, M, BI, rest);
-    /* кисти — перчатки GLB рига (viewmodel/ak.js); перчатка модели — запасная */
+    /* кисти — перчатки GLB рига (viewmodel/hands.js); перчатка модели — запасная */
     const handAssets = typeof self !== 'undefined' && self.GAssets && self.GAssets.data.vm_hands;
-    const glbHands = !!(pack && AKA && handAssets);
+    const glbHands = !!(pack && HANDS && handAssets);
     if (glbHands) delete geos.glove;
     /* наколенники и нашивки на рукавах (gear.js) */
-    if (pack && GEAR) Object.assign(geos, GEAR.gearGeometry(THREE, pack.hdr.joints, BI, P));
+    if (pack && GEAR) {
+      const gk = P.kneePads ? 'pads' : 'nopads';
+      if (!gearCache.has(gk)) gearCache.set(gk, GEAR.gearGeometry(THREE, pack.hdr.joints, BI, P));
+      Object.assign(geos, gearCache.get(gk));
+    }
 
     /* --- three-скелет --- */
     const tb = bones.map((b) => {
@@ -491,7 +517,9 @@
     tb[0].updateMatrixWorld(true);
     const skeleton = new THREE.Skeleton(tb);
 
-    const mats = pack ? packMaterials(THREE, P, pack) : buildMaterials(THREE, P);
+    const mk = (pack ? 'p|' : 'g|') + matKey(P);
+    if (!matCache.has(mk)) matCache.set(mk, pack ? packMaterials(THREE, P, pack) : buildMaterials(THREE, P));
+    const mats = matCache.get(mk);
     const root = new THREE.Group();
     root.name = 'soldier_' + key;
     root.add(tb[0]);
@@ -518,7 +546,7 @@
       rest, meshes, materials: mats,
       bone: (n) => tb[BI[n]]
     };
-    if (glbHands) char.hands = AKA.attachHands(char, handAssets);
+    if (glbHands) char.hands = HANDS.attachHands(char, handAssets);
     return char;
   }
 
@@ -923,5 +951,5 @@ transformed = (bindMatrixInverse * vec4(dqP, 1.0)).xyz;
     return out;
   }
 
-  return { PRESETS, ORDER, build, buildMaterials };
+  return { PRESETS, ORDER, CAMOS, VARIANT_KEYS, build, variant, buildMaterials };
 });

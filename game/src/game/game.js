@@ -1,16 +1,17 @@
 /* ============================================================================
-   Игровой слой: сцена, четыре бойца, выбор персонажа, камера, баллистика.
+   Лобби SIGNUM: полигон, четыре генерала, свободная камера, выбор генерала,
+   вид от его глаз и стрельба по мишеням. Меню — game/lobby.js.
 
-   Порядок кадра важен и выдержан строго:
-     1) ввод -> контроллер игрока (позиция, отдача, стрельба);
+   Порядок кадра:
+     1) ввод -> контроллер (генерал) или свободная камера;
      2) поза бойца (корпус, ноги, голова);
-     3) размещение оружия относительно плеча и взгляда;
-     4) обратная кинематика рук к рукоятке и цевью;
-     5) камера: свободная / от третьего лица / от глаз бойца;
-     6) эффекты и рендер.
+     3) оружие и руки: GHold (вид со стороны) или бодикам (от первого лица);
+     4) камера, смещение кадра под правую панель меню;
+     5) подписи генералов, эффекты и рендер.
 
-   Такой порядок гарантирует, что руки всегда держат оружие, а оружие
-   всегда согласовано со взглядом: ничего не «летает в воздухе».
+   Оружие генерала — из профиля (lib/profile.js): loadouts[general] ->
+   основное (или пистолет) собирается game/lib/weapons с модулями. Без
+   снаряжения генерал стоит без оружия, руки по швам.
    ========================================================================== */
 (function (root, factory) {
   const G = factory(root);
@@ -258,7 +259,7 @@
         }
         composer.addPass(new A.OutputPass());
         let smaa = null;
-        if (samples < 2 && A.SMAAPass && !DEV) { smaa = new A.SMAAPass(512, 512); composer.addPass(smaa); }
+        if (A.SMAAPass && !DEV) { smaa = new A.SMAAPass(512, 512); smaa.enabled = samples < 2; composer.addPass(smaa); }
         const grade = new A.ShaderPass(GRADE_SHADER);
         composer.addPass(grade);
         /* линза бодикама (game/bodycam.js): включается от первого лица */
@@ -272,6 +273,13 @@
             u.uSat.value = L.sat; u.uContrast.value = L.contrast; u.uVig.value = L.vignette;
             u.uGrain.value = L.grain; u.uLift.value = L.lift;
             u.uShadowTint.value.fromArray(L.shadowTint); u.uHighTint.value.fromArray(L.highTint);
+          },
+          /* качество графики (settings.quality): AO, MSAA/SMAA */
+          quality(Q) {
+            if (gtao) gtao.enabled = !!Q.ao;
+            const n = DEV ? 0 : Math.min(Q.msaa, renderer.capabilities.maxSamples || 0);
+            for (const rt of [composer.renderTarget1, composer.renderTarget2]) if (rt.samples !== n) { rt.samples = n; rt.dispose(); }
+            if (smaa) smaa.enabled = n < 2;
           },
           resize(w, h) {
             composer.setPixelRatio(renderer.getPixelRatio());
@@ -312,7 +320,59 @@
     const fx = FX.create(THREE, scene);
     const audio = AUDIO.create();
 
+    /* ==================================================== профиль ====== */
+    let lobby = null;                              // game/lobby.js (создаётся после сцены)
+    const PROF = root.GProfile;
+    let prof = PROF.load();
+    let cmap = PROF.codeMap(prof);
+    const WLIB = GA && GA.data.weapons;             // game/lib/weapons (boot.js)
+    const HOLD = root.GHold;
+
+    /* ==================================================== качество ===== */
+    const QUALITY = {
+      low: { pr: 0.85, shadows: false, shadowSize: 1024, ao: false, msaa: 0 },
+      medium: { pr: 1.25, shadows: true, shadowSize: 1024, ao: false, msaa: 4 },
+      high: { pr: 1.5, shadows: true, shadowSize: 2048, ao: true, msaa: 4 }
+    };
+    let qualityNow = null;
+    function applyQuality(q) {
+      const Q = QUALITY[q] || QUALITY.medium;
+      qualityNow = q;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, Q.pr));
+      if (renderer.shadowMap.enabled !== Q.shadows) {
+        renderer.shadowMap.enabled = Q.shadows;
+        /* шейдеры с тенями и без — разные программы */
+        scene.traverse((o) => {
+          const m = o.material;
+          if (m) for (const x of Array.isArray(m) ? m : [m]) x.needsUpdate = true;
+        });
+      }
+      sun.castShadow = Q.shadows;
+      if (sun.shadow.mapSize.x !== Q.shadowSize) {
+        sun.shadow.mapSize.set(Q.shadowSize, Q.shadowSize);
+        if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
+      }
+      if (POST) POST.quality(Q);
+      onResize();
+    }
+
     /* ====================================================== бойцы ====== */
+    const TEAM_COLOR = { delta: 0xa9d27c, alpha: 0x9cc6ff };
+    const ringTex = (() => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const g = c.getContext('2d');
+      const gr = g.createRadialGradient(64, 64, 30, 64, 64, 62);
+      gr.addColorStop(0, 'rgba(255,255,255,0)');
+      gr.addColorStop(0.72, 'rgba(255,255,255,0.10)');
+      gr.addColorStop(0.86, 'rgba(255,255,255,0.85)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr;
+      g.fillRect(0, 0, 128, 128);
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      return t;
+    })();
     const squad = [];
     for (const sp of SPAWN) {
       const ch = CHAR.build(THREE, sp.key);
@@ -320,31 +380,35 @@
       ch.root.position.set(sp.x, gy, sp.z);
       ch.root.rotation.y = sp.yaw;
       scene.add(ch.root);
-
-      /* у каждого бойца — свой экземпляр АК-74 */
-      const gun = buildGun(THREE);
-      scene.add(gun.root);
-
       const rig = new RIG.Rig(THREE, ch);
-      squad.push({
-        key: sp.key, char: ch, rig, gun, spawn: sp,
+      const s = {
+        key: sp.key, char: ch, rig, spawn: sp,
         ctrl: PLAYER.create(THREE, { world, audio, fx }),
         idleSeed: Math.random() * 100,
-        active: false
-      });
-      const last = squad[squad.length - 1];
-      last.ctrl.pos.set(sp.x, gy, sp.z);
-      last.ctrl.yaw = sp.yaw;
-      /* Инерция наводки стартует с фактического курса: при lagYaw = 0 против
-         yaw = PI первые полсекунды ствол разворачивало вбок. */
-      last.ctrl.lagYaw = sp.yaw;
-      last.ctrl.lagPitch = last.ctrl.pitch;
-      /* курс, вокруг которого боец переминается без управления */
-      last.idleYaw = sp.yaw;
-      last.ctrl.magCap = 30;
-      /* Реакция на выстрел (трассировка, вспышка, гильза, звук) живёт в
-         основном цикле — там уже собраны мир и эффекты. Колбэк ставится в
-         startLoop, когда shootRay готов. */
+        active: false, build: null, wkey: '', wtitle: null
+      };
+      s.hold = HOLD ? HOLD.create(THREE, { char: ch, rig }) : null;
+      s.pose = root.GPose.create(THREE, ch, { rig, seed: s.idleSeed });
+      s.ctrl.pos.set(sp.x, gy, sp.z);
+      s.ctrl.yaw = sp.yaw;
+      /* инерция наводки стартует с фактического курса */
+      s.ctrl.lagYaw = sp.yaw;
+      s.ctrl.lagPitch = s.ctrl.pitch;
+      s.ctrl.ready = 0;
+      s.idleYaw = sp.yaw;
+      s.ctrl.configure(null);
+      /* мягкое кольцо на земле у выбранного генерала — цвет команды */
+      const ring = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.5), new THREE.MeshBasicMaterial({
+        map: ringTex, color: TEAM_COLOR[ch.preset.faction] || 0xffffff, transparent: true, opacity: 0.55,
+        depthWrite: false, fog: false, toneMapped: false
+      }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.renderOrder = 2;
+      ring.visible = false;
+      ring.userData.noAO = true;
+      scene.add(ring);
+      s.ring = ring;
+      squad.push(s);
     }
 
     /* ================================================= состояние игры = */
@@ -354,45 +418,55 @@
       candidate: -1,
       holdF: 0,
       score: 0,
-      /* свободная камера */
+      selected: PROF.GENERALS.some((g) => g.key === prof.general) ? prof.general : null,
+      menu: true,              // правая панель открыта
+      menuK: 1,                // 0..1 — смещение кадра под панель
+      idleT: 0,                // сколько камера стоит без движения
+      /* свободная камера: кадр меню — генералы в левой части экрана */
       free: {
-        pos: new THREE.Vector3(0, 1.62, 8.4),
-        yaw: 0, pitch: -0.05,
-        vel: new THREE.Vector3()
+        pos: new THREE.Vector3(0, 1.62, 7.7),
+        yaw: 0, pitch: -0.07,
+        vel: new THREE.Vector3(),
+        fov: prof.settings.fov
       },
       pointerLocked: false,
       started: false,
+      ready: false,
       time: 0
     };
-
-    /* Активное оружие подключается к системе модулей. */
-    /* Комплектация под референс: чёрный полимер вместо дерева — М-LOK цевьё,
-       телескопический приклад, штатный ДТК и магазин на 30. Пользователь
-       по-прежнему может поменять всё через TAB. */
-    Object.assign(ATTACH_STATE.config, {
-      muzzle: 'brake_ak', handguard: 'handguard_mlok',
-      stock: 'stock_telescopic', mag: 'mag_ak_30'
-    });
-    let ATTACH_ASM = attachToGun(THREE, squad[0].gun);
-    let attachedTo = 0;
+    const IDLE_MENU = 5;           // с: камера стоит — меню возвращается
+    const IK_FAR = 26;             // м: дальше руки не решаются
+    const WEAPON_NAME = (id) => { const w = PROF.weaponById(id); return w ? w.title : id; };
 
     /* ====================================================== ввод ====== */
+    const held = {};               // действие -> удерживается
     const input = {
-      fwd: 0, back: 0, left: 0, right: 0, up: 0, down: 0,
+      fwd: 0, back: 0, left: 0, right: 0,
       sprint: false, crouch: false, ads: false, leanL: false, leanR: false
     };
-    const keyMap = {
-      KeyW: 'fwd', KeyS: 'back', KeyA: 'left', KeyD: 'right',
-      ArrowUp: 'fwd', ArrowDown: 'back', ArrowLeft: 'left', ArrowRight: 'right'
-    };
+    const MOVE = ['fwd', 'back', 'left', 'right'];
+    function syncInput() {
+      input.fwd = held.fwd ? 1 : 0; input.back = held.back ? 1 : 0;
+      input.left = held.left ? 1 : 0; input.right = held.right ? 1 : 0;
+      input.sprint = !!held.sprint; input.crouch = !!held.crouch; input.ads = !!held.aim;
+      input.leanL = !!held.leanL; input.leanR = !!held.leanR;
+      S.spaceUp = !!held.jump;
+    }
+    function releaseAll() {
+      for (const k of Object.keys(held)) held[k] = false;
+      syncInput();
+      S.fDown = false;
+      for (const a of MOVE) lobby && lobby.key(a, false);
+      trigger(false);
+    }
 
     const dom = renderer.domElement;
     const el = (id) => document.getElementById(id);
     const ui = {
-      start: el('start'), startGo: el('startGo'), loading: el('loading'),
-      ammoN: el('ammoN'), ammoR: el('ammoR'), mode: el('mode'),
+      loader: el('loader'), loading: el('loading'), labels: el('labels'),
+      ammoN: el('ammoN'), ammoR: el('ammoR'), ammoCal: el('ammoCal'), mode: el('mode'),
       whoName: el('whoName'), whoSide: el('whoSide'), who: el('who'),
-      prompt: el('prompt'), promptLbl: el('promptLbl'), promptSub: el('promptSub'),
+      prompt: el('prompt'), promptLbl: el('promptLbl'), promptSub: el('promptSub'), promptKey: el('promptKey'),
       promptFill: document.querySelector('#prompt .fill'),
       toast: el('toast'), scoreN: el('scoreN'), stamina: el('stamina'),
       staminaBar: document.querySelector('#stamina i'),
@@ -411,103 +485,158 @@
       }, ms || 1900);
     }
 
-    /* Панель модулей забирает TAB себе; пока она открыта, мышь свободна. */
-    let custOpen = false;
+    const active = () => (S.activeIdx >= 0 ? squad[S.activeIdx] : null);
+    const blocked = () => !!(lobby && lobby.capturing());
 
-    window.addEventListener('keydown', (e) => {
-      if (e.code === 'Tab') { e.preventDefault(); }
-      if (keyMap[e.code]) { input[keyMap[e.code]] = 1; return; }
-      switch (e.code) {
-        case 'ShiftLeft': case 'ShiftRight': input.sprint = true; break;
-        case 'ControlLeft': case 'KeyC': input.crouch = true; break;
-        case 'KeyQ': input.leanL = true; break;
-        case 'KeyE': input.leanR = true; break;
-        case 'KeyF': if (!e.repeat) S.fDown = true; break;
-        case 'KeyR': if (!e.repeat) doReload(); break;
-        case 'KeyV': if (!e.repeat) doInspect(); break;
-        case 'KeyT': if (!e.repeat) S.tp = !S.tp; break;
-        case 'Escape': document.exitPointerLock && document.exitPointerLock(); break;
-        default: break;
-      }
-    });
-    window.addEventListener('keyup', (e) => {
-      if (keyMap[e.code]) { input[keyMap[e.code]] = 0; return; }
-      switch (e.code) {
-        case 'ShiftLeft': case 'ShiftRight': input.sprint = false; break;
-        case 'ControlLeft': case 'KeyC': input.crouch = false; break;
-        case 'KeyQ': input.leanL = false; break;
-        case 'KeyE': input.leanR = false; break;
-        case 'KeyF': S.fDown = false; break;
-        default: break;
-      }
-    });
+    /* Звук — только после жеста пользователя (политика автозапуска). */
+    function firstGesture() {
+      if (S.started) return;
+      S.started = true;
+      audio.init();
+      audio.resume();
+      if (audio.setVolume) audio.setVolume(prof.settings.volume);
+    }
+    function lockPointer() {
+      try {
+        const r = dom.requestPointerLock();
+        if (r && r.catch) r.catch(() => {});
+      } catch (e) { /* нет pointer lock (headless, iframe) */ }
+    }
 
-    /* Режим огня (X) прокидывается в систему модулей исходника. */
-    window.__cycleFireMode = () => {
+    function setMenu(on) {
+      on = !!on;
+      if (S.menu === on) return;
+      S.menu = on;
+      document.body.classList.toggle('menu', on);
+      S.idleT = 0;
+      if (on) {
+        releaseAll();
+        if (document.pointerLockElement) document.exitPointerLock();
+        lobby && lobby.refresh();
+      }
+    }
+
+    function trigger(down) {
       const a = active();
-      if (!a) return;
+      if (a && a.build) a.ctrl.pullTrigger(!!down);
+    }
+
+    function cycleFireMode() {
+      const a = active();
+      if (!a || !a.build) return;
       const m = a.ctrl.cycleFireMode();
       const NAME = { safe: 'ПРЕДОХРАНИТЕЛЬ', auto: 'АВТО', semi: 'ОДИНОЧНЫЙ' };
-      ui.mode.textContent = NAME[m];
-      toast(NAME[m], 1100);
-    };
-
-    dom.addEventListener('mousedown', (e) => {
-      if (!S.started) return;
-      if (!S.pointerLocked && !custOpen) { dom.requestPointerLock(); return; }
-      if (e.button === 0) { const a = active(); a && a.ctrl.pullTrigger(true); }
-      if (e.button === 2) input.ads = true;
-    });
-    window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) { const a = active(); a && a.ctrl.pullTrigger(false); }
-      if (e.button === 2) input.ads = false;
-    });
-    dom.addEventListener('contextmenu', (e) => e.preventDefault());
-
-    const SENS = 0.00155;
-    window.addEventListener('mousemove', (e) => {
-      if (!S.pointerLocked) return;
-      const dx = e.movementX || 0, dy = e.movementY || 0;
-      const a = active();
-      if (a) a.ctrl.look(dx, dy, SENS);
-      else {
-        S.free.yaw -= dx * SENS;
-        S.free.pitch = clamp(S.free.pitch - dy * SENS, -1.4, 1.4);
-      }
-    });
-
-    document.addEventListener('pointerlockchange', () => {
-      S.pointerLocked = document.pointerLockElement === dom;
-      if (!S.pointerLocked) {
-        const a = active();
-        a && a.ctrl.pullTrigger(false);
-        input.ads = false;
-      }
-    });
-
-    window.addEventListener('resize', () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      if (POST) POST.resize(window.innerWidth, window.innerHeight);
-    });
-
-    /* --------------------------------------------------- вспомогательное */
-    const active = () => (S.activeIdx >= 0 ? squad[S.activeIdx] : null);
-
+      ui.mode.textContent = NAME[m] || m;
+      toast(NAME[m] || m, 1100);
+    }
     function doReload() {
       const a = active();
-      if (!a) return;
+      if (!a || !a.build) return;
       if (a.ctrl.startReload()) toast('ПЕРЕЗАРЯДКА', 900);
       else if (a.ctrl.reserve <= 0) toast('НЕТ ПАТРОНОВ', 1200);
     }
     function doInspect() {
       const a = active();
-      if (a) a.ctrl.startInspect();
+      if (a && a.build) a.ctrl.startInspect();
     }
 
-    /* Свободная камера летает между бойцами: плавный разгон, без коллизий
-       с травой, но с ограничением по высоте и границам участка. */
+    /* Действия — по клавишам профиля (settings.keys). */
+    function onAction(act, down, repeat) {
+      if (!down) {
+        held[act] = false;
+        syncInput();
+        if (MOVE.includes(act)) lobby && lobby.key(act, false);
+        if (act === 'use') S.fDown = false;
+        if (act === 'fire') trigger(false);
+        return;
+      }
+      if (act === 'menu') {
+        if (!repeat) { setMenu(!S.menu); if (!S.menu) lockPointer(); }
+        return;
+      }
+      if (MOVE.includes(act)) lobby && lobby.key(act, true);
+      if (S.menu) {
+        /* W A S D из меню — панель уезжает, камера летит */
+        if (!MOVE.includes(act)) return;
+        setMenu(false);
+        lockPointer();
+      }
+      S.idleT = 0;
+      held[act] = true;
+      syncInput();
+      if (repeat) return;
+      switch (act) {
+        case 'use': S.fDown = true; break;
+        case 'reload': doReload(); break;
+        case 'fireMode': cycleFireMode(); break;
+        case 'inspect': doInspect(); break;
+        case 'thirdPerson': S.tp = !S.tp; break;
+        case 'fire': trigger(true); break;
+        default: break;
+      }
+    }
+    function onCode(code, down, repeat) {
+      const acts = cmap[code];
+      if (!acts) return false;
+      for (const a of acts) onAction(a, down, repeat);
+      return true;
+    }
+
+    window.addEventListener('keydown', (e) => {
+      firstGesture();
+      if (e.code === 'Tab') e.preventDefault();
+      if (blocked()) return;
+      if (e.code === 'Escape') { setMenu(true); return; }
+      if (onCode(e.code, true, e.repeat)) {
+        if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (e) => { onCode(e.code, false, false); });
+    window.addEventListener('blur', releaseAll);
+
+    dom.addEventListener('mousedown', (e) => {
+      firstGesture();
+      if (blocked()) return;
+      /* клик по полигону при открытом меню — начать полёт */
+      if (S.menu) { setMenu(false); lockPointer(); return; }
+      if (!S.pointerLocked) { lockPointer(); return; }
+      onCode('Mouse' + e.button, true, false);
+    });
+    window.addEventListener('mouseup', (e) => { onCode('Mouse' + e.button, false, false); });
+    dom.addEventListener('contextmenu', (e) => e.preventDefault());
+    window.addEventListener('click', firstGesture);
+
+    const SENS = 0.00155;
+    window.addEventListener('mousemove', (e) => {
+      if (!S.pointerLocked || S.menu || blocked()) return;
+      const dx = e.movementX || 0, dy = e.movementY || 0;
+      if (dx || dy) S.idleT = 0;
+      const k = SENS * (prof.settings.sens || 1);
+      const a = active();
+      if (a) a.ctrl.look(dx, dy, k);
+      else {
+        S.free.yaw -= dx * k;
+        S.free.pitch = clamp(S.free.pitch - dy * k, -1.4, 1.4);
+      }
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      S.pointerLocked = document.pointerLockElement === dom;
+      if (!S.pointerLocked) { trigger(false); held.aim = false; syncInput(); }
+    });
+
+    let panelW = 0;
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      if (POST) POST.resize(window.innerWidth, window.innerHeight);
+      const m = el('menu');
+      panelW = m ? m.offsetWidth : 0;
+    }
+    window.addEventListener('resize', onResize);
+
+    /* Свободная камера: плавный разгон, без коллизий, в границах участка. */
     function updateFree(dt) {
       const f = S.free;
       const speed = (input.sprint ? 9.5 : 4.2);
@@ -516,20 +645,15 @@
       if (input.back) wz += 1;
       if (input.left) wx -= 1;
       if (input.right) wx += 1;
-      if (input.crouch) wy -= 1;              // Ctrl/C — вниз
-      if (S.spaceUp) wy += 1;                 // пробел — вверх
-      /* Летим туда, куда смотрим: строим базис камеры из её же кватерниона,
-         а не вручную из синусов. Ручная раскладка раньше путала знак yaw
-         (W уводил назад) и дробила pitch на отдельные слагаемые. */
+      if (input.crouch) wy -= 1;
+      if (S.spaceUp) wy += 1;
       const want = new THREE.Vector3();
       const len = Math.hypot(wx, wz);
       if (len > 0) {
-        const q = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(f.pitch, f.yaw, 0, 'YXZ'));
+        const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(f.pitch, f.yaw, 0, 'YXZ'));
         const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
         const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
-        want.addScaledVector(fwd, (-wz / len) * speed)
-          .addScaledVector(right, (wx / len) * speed);
+        want.addScaledVector(fwd, (-wz / len) * speed).addScaledVector(right, (wx / len) * speed);
       }
       want.y += wy * speed * 0.9;
       f.vel.lerp(want, 1 - Math.exp(-9 * dt));
@@ -540,28 +664,33 @@
       f.pos.z = clamp(f.pos.z, -33, 33);
     }
 
-    /* ================================================== выбор бойца === */
-    /* Кандидат — ближайший боец в конусе взгляда на дистанции USE_RANGE.
-       В режиме управления кандидатом может быть только ДРУГОЙ боец. */
-    const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3();
-    function findCandidate() {
-      const eye = camera.getWorldPosition(_v1);
-      const dir = camera.getWorldDirection(_v2);
-      let best = -1, bestScore = -1;
-      for (let i = 0; i < squad.length; i++) {
-        if (i === S.activeIdx) continue;
-        const s = squad[i];
-        const p = s.ctrl.pos;
-        const dx = p.x - eye.x, dz = p.z - eye.z;
-        const dy = (p.y + 1.1) - eye.y;
-        const dist = Math.hypot(dx, dy, dz);
-        if (dist > USE_RANGE) continue;
-        const dot = (dx * dir.x + dy * dir.y + dz * dir.z) / (dist || 1);
-        if (dot < 0.35) continue;             // нужно смотреть примерно на него
-        const score = dot / Math.max(0.4, dist);
-        if (score > bestScore) { bestScore = score; best = i; }
+
+    /* ============================================ выбор и оружие ====== */
+    function select(key) {
+      S.selected = key;
+      prof = PROF.update((p) => { p.general = key; });
+      lobby && lobby.refresh();
+    }
+
+    /* Характеристики оружия -> контроллер; патроны из слотов снаряжения
+       (на полигоне — не меньше трёх магазинов). */
+    function configureCtrl(s) {
+      const c = s.ctrl;
+      if (!s.build) {
+        c.configure(null);
+        ui.ammoCal.textContent = '—';
+        document.body.classList.add('unarmed');
+        return;
       }
-      return best;
+      const st = s.build.stats || {};
+      const sum = PROF.summarize(prof.loadouts[s.key]);
+      const isSec = s.build.id === 'glock18c' || (s.build.def && s.build.def.kind === 'secondary');
+      const slotAmmo = isSec ? sum.secondaryAmmo : sum.primaryAmmo;
+      c.configure(Object.assign({}, st, { reserve: Math.max(slotAmmo, (st.magCap || 30) * 3) }));
+      ui.ammoCal.textContent = st.cal || '';
+      const NAME = { safe: 'ПРЕДОХРАНИТЕЛЬ', auto: 'АВТО', semi: 'ОДИНОЧНЫЙ' };
+      ui.mode.textContent = NAME[c.fireMode] || c.fireMode;
+      document.body.classList.remove('unarmed');
     }
 
     function embody(idx) {
@@ -570,14 +699,14 @@
         prev.active = false;
         prev.ctrl.pullTrigger(false);
         prev.ctrl.ads = 0;
+        prev.hold && prev.hold.snap();
       }
       S.activeIdx = idx;
       const a = squad[idx];
       a.active = true;
-      /* система модулей переезжает на оружие нового бойца */
-      ATTACH_ASM = attachToGun(THREE, a.gun);
-      attachedTo = idx;
-      syncAmmoCap();
+      select(a.key);
+      if (BC) BC.setWeapon(a.build);
+      configureCtrl(a);
       audio.resume();
       audio.ui(true);
       audio.gearRattle(1);
@@ -585,29 +714,31 @@
       ui.who.className = P.faction;
       ui.whoName.textContent = P.name;
       ui.whoSide.textContent = (P.faction === 'delta' ? 'ДЕЛЬТА' : 'АЛЬФА') + ' · ' + P.callsign.toUpperCase();
-      toast('УПРАВЛЕНИЕ: ' + P.name, 1500);
+      toast('ГЕНЕРАЛ ' + P.name + ' · ' + (a.build ? a.wtitle : 'БЕЗ ОРУЖИЯ'), 1700);
       S.mode = 'embodied';
+      document.body.classList.add('embodied');
+      if (S.menu) setMenu(false);
     }
 
     function disembody() {
       const a = active();
       if (!a) return;
       if (audio.motion) audio.motion(0);
-      /* Свободная камера появляется там, где стоял боец, чуть в стороне. */
+      /* свободная камера появляется за спиной генерала */
       const f = S.free;
       f.yaw = a.ctrl.yaw;
       f.pitch = clamp(a.ctrl.pitch, -0.6, 0.4);
       const back = 1.5;
-      f.pos.set(
-        a.ctrl.pos.x + Math.sin(f.yaw) * back,
-        a.ctrl.pos.y + 1.72,
-        a.ctrl.pos.z + Math.cos(f.yaw) * back
-      );
+      f.pos.set(a.ctrl.pos.x + Math.sin(f.yaw) * back, a.ctrl.pos.y + 1.72, a.ctrl.pos.z + Math.cos(f.yaw) * back);
       f.vel.set(0, 0, 0);
       a.active = false;
       a.ctrl.pullTrigger(false);
+      a.ctrl.ads = 0;
+      a.hold && a.hold.snap();
       S.activeIdx = -1;
       S.mode = 'free';
+      S.idleT = 0;
+      document.body.classList.remove('embodied', 'unarmed');
       audio.ui(false);
       ui.who.className = '';
       ui.whoName.textContent = '—';
@@ -615,32 +746,72 @@
       toast('СВОБОДНАЯ КАМЕРА', 1300);
     }
 
-    function syncAmmoCap() {
-      const a = active();
-      if (!a) return;
-      const cap = (ATTACH_ASM && ATTACH_ASM.derived && ATTACH_ASM.derived.magCap) || 30;
-      a.ctrl.magCap = cap;
-      if (a.ctrl.ammo > cap) a.ctrl.ammo = cap;
+    /* Оружие генерала по профилю: основное, иначе пистолет, иначе без оружия. */
+    async function armGeneral(s) {
+      const lo = prof.loadouts[s.key];
+      const sum = PROF.summarize(lo);
+      const id = sum.primary || sum.secondary || null;
+      const cfg = id && lo && lo.weapons ? lo.weapons[id] || null : null;
+      const wkey = id ? id + ':' + JSON.stringify(cfg) : '';
+      if (wkey === s.wkey) return s.build;
+      s.wkey = wkey;
+      let build = null;
+      if (id && WLIB) {
+        try { build = await WLIB.buildWeapon(id, cfg); } catch (e) { console.warn('weapon ' + id + ' failed:', e && e.message); }
+        if (s.wkey !== wkey) return s.build;       // пока собирали — снаряжение сменилось
+      }
+      s.build = build;
+      s.wtitle = build ? WEAPON_NAME(id) : null;
+      if (s.hold) s.hold.setWeapon(build);
+      else if (build) scene.add(build.root);
+      if (squad[S.activeIdx] === s) { if (BC) BC.setWeapon(build); configureCtrl(s); }
+      updateLabelText(s);
+      lobby && lobby.refresh();
+      return build;
+    }
+    let arming = null;
+    function armAll() {
+      prof = PROF.load();
+      if (PROF.GENERALS.some((g) => g.key === prof.general)) S.selected = prof.general;
+      arming = (arming || Promise.resolve()).then(async () => { for (const s of squad) await armGeneral(s); });
+      return arming;
     }
 
-    /* Удержание F: заполняем индикатор, по завершении — переключение. */
+    /* ================================================== выбор бойца === */
+    /* Кандидат — ближайший генерал в конусе взгляда на дистанции USE_RANGE. */
+    const _c1 = new THREE.Vector3(), _c2 = new THREE.Vector3();
+    function findCandidate() {
+      const eye = camera.getWorldPosition(_c1);
+      const dir = camera.getWorldDirection(_c2);
+      let best = -1, bestScore = -1;
+      for (let i = 0; i < squad.length; i++) {
+        if (i === S.activeIdx) continue;
+        const p = squad[i].ctrl.pos;
+        const dx = p.x - eye.x, dz = p.z - eye.z;
+        const dy = (p.y + 1.1) - eye.y;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist > USE_RANGE) continue;
+        const dot = (dx * dir.x + dy * dir.y + dz * dir.z) / (dist || 1);
+        if (dot < 0.35) continue;
+        const score = dot / Math.max(0.4, dist);
+        if (score > bestScore) { bestScore = score; best = i; }
+      }
+      return best;
+    }
+
+    /* Удержание F (клавиша «use»): рядом генерал — выбрать и войти, иначе — выйти. */
     function updateUse(dt) {
       const cand = findCandidate();
       S.candidate = cand;
       const inRange = cand >= 0;
       const canExit = S.mode === 'embodied';
-
-      /* Подсказка показывается только когда рядом есть другой боец.
-         Раньше «ОТПУСТИТЬ ОПЕРАТОРА» висело посреди экрана постоянно и
-         перекрывало прицеливание. Выйти по-прежнему можно в любой момент —
-         просто без назойливой плашки: об этом сказано на экране старта. */
       let showPrompt = false, lbl = '', sub = '';
       if (inRange) {
+        const P = squad[cand].char.preset;
         showPrompt = true;
-        lbl = 'ВЗЯТЬ: ' + squad[cand].char.preset.name;
-        sub = 'удерживайте F';
+        lbl = 'ВЫБРАТЬ: ' + P.name + ' «' + P.callsign + '»';
+        sub = 'удерживайте';
       }
-
       if (S.fDown && (showPrompt || canExit)) {
         S.holdF += dt;
         if (S.holdF >= HOLD_TIME) {
@@ -651,499 +822,79 @@
       } else {
         S.holdF = Math.max(0, S.holdF - dt * 2.4);
       }
-
-      /* Во время удержания F вне зоны бойца показываем индикатор выхода —
-         он появляется по факту нажатия, а не висит всё время. */
       const exiting = !showPrompt && canExit && S.holdF > 0.02;
-      ui.prompt.classList.toggle('on', (showPrompt || exiting) && !custOpen);
+      ui.prompt.classList.toggle('on', showPrompt || exiting);
       if (showPrompt || exiting) {
-        if (exiting) { lbl = 'ОТПУСТИТЬ ОПЕРАТОРА'; sub = 'удерживайте F'; }
+        if (exiting) { lbl = 'ВЫЙТИ В СВОБОДНУЮ КАМЕРУ'; sub = 'удерживайте'; }
+        ui.promptKey.textContent = PROF.keyLabel(prof.settings.keys.use);
         ui.promptLbl.textContent = lbl;
         ui.promptSub.textContent = sub;
         ui.promptFill.style.transform = 'scaleY(' + (S.holdF / HOLD_TIME).toFixed(3) + ')';
       }
     }
 
-    const G = startLoop({
-      THREE, renderer, scene, camera, world, fx, audio, squad, sun, sunDir, renderFrame, getPost: () => POST,
-      S, input, ui, toast, active, updateFree, updateUse, syncAmmoCap,
-      getAsm: () => ATTACH_ASM, setAsm: (v) => { ATTACH_ASM = v; },
-      setCustOpen: (v) => { custOpen = v; }, isCustOpen: () => custOpen,
-      SENS, embodyFn: embody, disembodyFn: disembody
-    });
-    /* подбор картинки из консоли: __GAME.look({ exposure: 1.1, fogDensity: 0.03 }) */
-    G.look = (o) => { Object.assign(LOOK, o || {}); applyLook(); return Object.assign({}, LOOK, { post: !!POST }); };
-    G.post = () => POST;
-    return G;
-  }
-
-  /* ==================================================== ОРУЖИЕ ========= */
-  /* Каждому бойцу собирается свой АК-74 из вендорного кода. Система
-     модулей (TAB) глобальная и управляет тем экземпляром, который сейчас
-     в руках у игрока: остальные остаются в базовой конфигурации. */
-  function buildGun(THREE) {
-    const mount = new THREE.Group();        // узел «оружие в руках»
-    mount.name = 'weaponMount';
-    const recoilRig = new THREE.Group();    // отход назад
-    const tiltRig = new THREE.Group();      // подброс ствола
-    mount.add(recoilRig);
-    recoilRig.add(tiltRig);
-
-    const gun = buildAK74(THREE, {});
-    tiltRig.add(gun);
-
-    /* Группа магазина участвует в скрытии: её помечаем, как в исходнике. */
-    if (gun.parts.magazine) gun.parts.magazine.userData.__occGroup = 'magazine';
-
-    gun.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-
-    return {
-      root: mount, recoilRig, tiltRig, gun,
-      nodes: gun.nodes, dirs: gun.dirs, parts: gun.parts, anim: gun.anim,
-      attachRoot: null,
-      /* локальные (в системе оружия) точки, м */
-      muzzleLocal: new THREE.Vector3().copy(gun.nodes.muzzle.position),
-      ejectLocal: new THREE.Vector3().copy(gun.nodes.caseSpawn.position)
-    };
-  }
-
-  /* Система модулей подключается к активному оружию: она глобальная,
-     поэтому при смене бойца пересобираем её на новом экземпляре. */
-  function attachToGun(THREE, wep) {
-    if (typeof attachRebuild !== 'function') return null;
-    if (ATTACH_STATE.view && ATTACH_STATE.view.root.parent)
-      ATTACH_STATE.view.root.parent.remove(ATTACH_STATE.view.root);
-
-    const weapon = {
-      caliber: ATTACH_DEF.caliber, weight: ATTACH_DEF.weight,
-      ballistics: ATTACH_DEF.ballistics, stats: {}, base: [],
-      nodes: {}, slots: attachSlots()
-    };
-    const asm = __ATTACH.SYS.assemble(weapon, __ATTACH.REG, ATTACH_STATE.config);
-    const parentFor = (slotKey) => (slotKey === 'mag' ? wep.parts.magazine : null);
-    const view = __ATTACH.ADAPTER.build(THREE, asm, {
-      scale: 0.001, parentFor, hostRoot: wep.gun
-    });
-    view.root.traverse((o) => {
-      o.userData.attachModule = true;
-      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
-    });
-    wep.gun.add(view.root);
-    ATTACH_STATE.asm = asm;
-    ATTACH_STATE.view = view;
-    attachOcclude(THREE, wep.gun);
-    attachSyncBeams();
-    attachSyncDeploy();
-    wep.attachRoot = view.root;
-    return asm;
-  }
-
-  /* ==================================================== ОСНОВНОЙ ЦИКЛ = */
-  function startLoop(C) {
-    const { THREE, renderer, scene, camera, world, fx, audio, squad, sun,
-      S, input, ui, toast, active, updateFree, updateUse, syncAmmoCap } = C;
-    const clamp = U.clamp;
+    /* ============================================ подписи генералов === */
+    for (const s of squad) {
+      const P = s.char.preset;
+      const d = document.createElement('div');
+      d.className = 'glabel off ' + P.faction;
+      d.innerHTML = '<b></b><u></u><s></s>';
+      ui.labels.appendChild(d);
+      s.label = d;
+      updateLabelText(s);
+    }
+    function updateLabelText(s) {
+      if (!s.label) return;
+      const P = s.char.preset;
+      s.label.querySelector('b').textContent = P.name + ' · «' + P.callsign + '»';
+      s.label.querySelector('u').textContent = 'КОМАНДА ' + (P.faction === 'delta' ? 'ДЕЛЬТА' : 'АЛЬФА');
+      s.label.querySelector('s').textContent = s.build ? s.wtitle : 'без оружия';
+    }
+    const _lp = new THREE.Vector3();
+    function updateLabels(t) {
+      for (let i = 0; i < squad.length; i++) {
+        const s = squad[i];
+        const sel = s.key === S.selected;
+        const isActive = i === S.activeIdx;
+        s.label.classList.toggle('sel', sel);
+        /* кольцо: только выбранный и не тот, чьими глазами смотрим */
+        s.ring.visible = sel && !(isActive && !S.tp);
+        if (s.ring.visible) {
+          s.ring.position.set(s.ctrl.pos.x, s.ctrl.pos.y + 0.03, s.ctrl.pos.z);
+          s.ring.material.opacity = 0.42 + Math.sin(t * 2.2) * 0.1;
+        }
+        let show = !isActive && !S.spectate;
+        let x = 0, y = 0, d = 0;
+        if (show) {
+          s.char.bone('head').getWorldPosition(_lp);
+          _lp.y += 0.36;
+          d = _lp.distanceTo(camera.position);
+          _lp.project(camera);
+          show = _lp.z < 1 && d < 34 && Math.abs(_lp.x) < 1.2 && Math.abs(_lp.y) < 1.2;
+          x = (_lp.x * 0.5 + 0.5) * window.innerWidth;
+          y = (-_lp.y * 0.5 + 0.5) * window.innerHeight;
+        }
+        s.label.classList.toggle('off', !show);
+        if (!show) s.label.style.opacity = '0';
+        else {
+          s.label.style.transform = 'translate(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px) translate(-50%,-100%)';
+          s.label.style.opacity = String(U.clamp01((34 - d) / 12));
+        }
+      }
+    }
 
     /* ------------------------------------------------- поза бойца ----- */
-    /* Кости расставляются каждый кадр «с нуля»: базовая стойка + дельты от
-       движения, приседа, наклона и дыхания. Затем руки решаются IK. */
-    const _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
-
+    /* Корпус, ноги, голова — anim/pose.js; управляемый генерал качается
+       меньше и не оглядывается, фаза шага — общая с его контроллером. */
     function poseSoldier(s, dt, isActive, t) {
-      const c = s.ctrl, ch = s.char, rig = s.rig, M = ch.metrics;
-      const b = (n) => ch.bone(n);
-      const LOCO = root.GLoco;
-      /* стойка и манера у каждого бойца своя (anim/locomotion.js) */
-      const st = s.stance || (s.stance = LOCO.stanceFor(s.idleSeed));
-      const g = LOCO.gait(c, M, st);
-
-      /* --- корпус --- */
-      const moveAmt = U.clamp01(c.speed / c.PHYS.sprint);
-      const breath = Math.sin(c.breathT * 1.5) * 0.5 + Math.sin(c.breathT * 0.73) * 0.5;
-      const breathAmp = U.lerp(0.006, 0.026, 1 - c.stamina / c.PHYS.staminaMax);
-      /* «жизнь» в строю: вес переходит с ноги на ногу, голова оглядывается */
-      const still = 1 - g.gaitK;
-      const life = LOCO.idleLife(t, s.idleSeed, st);
-      const idleK = isActive ? still * 0.35 : still;
-      const shift = life.shift * idleK;
-
-      /* Наклон вперёд: под бронёй корпус всегда чуть завален, на бегу —
-         сильнее (центр масс впереди опоры). */
-      const lean = 0.06 + g.lean + c.crouch * 0.18;
-      const sideLean = -c.lean * 0.26;
-
-      /* Разворот корпуса (bladed stance) — только в стрелковой стойке;
-         в строю «на ремне» боец стоит к цели грудью. */
-      const kStance = U.smoothstep(c.ready === undefined ? (isActive ? 1 : 0) : c.ready);
-      const blade = U.lerp(0.52, 0.46, U.smoothstep(c.ads)) * (1 - U.smoothstep(c.sprint) * 0.55)
-        * U.lerp(0.06, 1, kStance);
-      const crouchDrop = c.crouch * (M.hipY - 0.50);
-
-      ch.root.position.set(c.pos.x, c.pos.y, c.pos.z);
-      ch.root.rotation.y = c.yaw;
-
-      const hips = b('hips');
-      hips.position.set(g.sway * 0.5 + shift * 0.028, M.hipY - crouchDrop + g.bob - Math.abs(shift) * 0.008, 0);
-      hips.rotation.set(
-        lean * 0.35 + c.crouch * 0.22,
-        -blade * 0.30 + g.pelvisYaw,
-        sideLean * 0.4 + g.pelvisRoll - shift * 0.045
-      );
-      /* позвоночник несёт наклон; грудь отвечает тазу встречным поворотом */
-      b('spine').rotation.set(lean * 0.40 + breath * breathAmp * 0.5,
-        -blade * 0.26 + g.chestYaw * 0.45, sideLean * 0.35 + shift * 0.03);
-      b('chest').rotation.set(lean * 0.30 - c.ads * 0.05 + breath * breathAmp,
-        -blade * 0.44 + g.chestYaw * 0.55, sideLean * 0.45 + shift * 0.02);
-
-      /* Голова держит взгляд по оси прицеливания и гасит качку корпуса;
-         в строю — медленно оглядывается. */
-      const totalLean = lean * 0.70;
-      const bladeComp = blade * 0.70 - g.chestYaw * 0.8;
-      const look = isActive ? 0 : life.look;
-      b('neck').rotation.set(clamp(c.pitch * 0.34 - totalLean * 0.5, -0.5, 0.5), bladeComp * 0.40 + look * 0.4, 0);
-      b('head').rotation.set(clamp(c.pitch * 0.55 - totalLean * 0.5 + (isActive ? 0 : life.nod), -0.7, 0.62),
-        bladeComp * 0.60 + look * 0.6, -sideLean * 0.3 + (isActive ? 0 : st.headTilt));
-
-      /* --- ноги: ключевые кривые шага и бега (anim/locomotion.js) ---
-         Знаки: hip.x > 0 — бедро вперёд; knee.x < 0 — сгиб колена;
-         ankle.x > 0 — носок вверх относительно голени. В опоре голеностоп
-         тянется к углу, при котором подошва лежит ровно. */
-      const plant = {};
-      for (const side of [1, -1]) {
-        const SS = side > 0 ? 'R' : 'L';
-        const Lg = g.legs[SS];
-        plant[SS] = Lg.plant;
-        /* нагруженная нога в строю прямее, свободная — согнута */
-        const load = side > 0 ? shift : -shift;
-        const tonus = st.bend * (1 - g.gaitK) * (1 - load * 0.6) + 0.04 + c.crouch * 1.15;
-        const hipX = Lg.hip - c.crouch * 0.85 - 0.02 - tonus * 0.45;
-        const kneeX = Lg.knee + tonus;
-        const flat = kneeX - hipX;                 // подошва ровно при таком сгибе
-        const ankleX = U.lerp(Lg.ankle + tonus * 0.2, flat, Lg.plant * 0.75) + 0.02;
-        b('hip' + SS).rotation.set(hipX, side * (0.04 + st.toeOut * 0.3), side * (st.width + 0.01 - load * 0.02));
-        b('knee' + SS).rotation.set(-kneeX, 0, 0);
-        b('ankle' + SS).rotation.set(ankleX, side * st.toeOut * 0.5, -side * (st.width * 0.6));
-        b('toe' + SS).rotation.set(Lg.toe, 0, 0);
-        /* протракция ключицы опорной руки: плечо выходит к цевью */
-        const protract = side < 0 ? -blade * 0.34 : -blade * 0.10;
-        b('clav' + SS).rotation.set(0, protract, -side * (0.05 + c.ads * 0.05));
-      }
-
-      /* стопы — на грунт (см. Rig.plantFeet) */
-      rig.plantFeet(c.groundAt, plant);
-
-      return { moveAmt, breath, lean, blade, gait: g };
-    }
-
-    /* --------------------------------------- размещение оружия -------- */
-    /* Оружие висит на «виртуальном плече»: точка перед грудью, которая
-       следует за взглядом с запаздыванием. Это и есть бодикам-механика:
-       ствол всегда чуть отстаёт от поворота головы и качается на шаге. */
-    /* Позы оружия — смещение узла оружия от глаз в системе взгляда (м).
-       Начало координат модели АК — у затыльника, ствол уходит в -Z, поэтому
-       чем меньше |z|, тем ближе оружие прижато к стрелку. Значения подобраны
-       так, чтобы приклад лёг в плечо, а цевьё осталось в зоне досягаемости
-       опорной руки (проверяется автотестом gripCheck). */
-    /* Оружие держится ДАЛЬШЕ от груди, чем было: при z = -0,085 приклад
-       упирался в бойца, правая кисть уезжала к плечу и локоть складывался
-       до 39°, чего у человека быть не может. Вынос вперёд даёт рабочие
-       70–95° в локте (проверяется gripCheck). */
-    /* Положение «наготове». Глубина (z) ограничена длиной опорной руки:
-       при z ниже -0,13 кисть не достаёт до цевья (расчёт в комментарии к
-       bladed stance). Высота -0,30 уводит оружие из поля зрения: при -0,20
-       ствол и предплечье перекрывали пол-экрана. */
-    const HIP_POSE = {
-      pos: new THREE.Vector3(0.125, -0.300, -0.105),
-      rot: new THREE.Euler(-0.05, -0.18, 0.06)
-    };
-    const ADS_POSE = {
-      pos: new THREE.Vector3(0, -0.030, -0.060),
-      rot: new THREE.Euler(0, 0, 0)
-    };
-    const RELOAD_POSE = {
-      pos: new THREE.Vector3(0.145, -0.375, -0.090),
-      rot: new THREE.Euler(0.30, -0.42, 0.24)
-    };
-    /* Строй «на ремне» задаётся не от глаз, а от ГРУДИ — как на референсе:
-       автомат лежит поперёк корпуса по диагонали, приклад у правой грудной,
-       ствол смотрит к левому колену, правый бок оружия — наружу.
-       Точки — места кистей в системе покоя бойца (м): правая на рукоятке
-       на уровне нижних рёбер, левая на цевье у пряжки ремня. Оружие ставится
-       так, чтобы его точки хвата легли ровно в них, поэтому поза не зависит
-       от цевья и длины оружия. out — куда смотрит правый бок оружия. */
-    /* right — место ПРАВОГО ЗАПЯСТЬЯ: кисть охватывает пистолетную
-       рукоятку, запястье — за ней (см. hands.js).
-       Хват рукоятки задаёт продолжение кисти назад-вверх, вдоль приклада.
-       При прежней крутой диагонали (ствол на 48° вниз, рукоятка у рёбер)
-       оно смотрело вертикально вверх, локоть же висит у бока — запястье
-       выламывалось на 94°. Сейчас рукоятка ниже, у пояса, ствол опущен на
-       ~28° вниз-влево-вперёд, приклад у правой грудной: предплечье идёт
-       вдоль кисти, излом запястья ~23° (правая) и ~21° (левая). */
-    const SLING = {
-      right: new THREE.Vector3(0.125, 1.100, -0.250),
-      barrel: new THREE.Vector3(-0.60, -0.45, -0.65),
-      out: new THREE.Vector3(0.20, 0.10, -1)
-    };
-    /* Бег: автомат прижат к груди стволом вниз — дуло смотрит в землю
-       перед левой ногой, приклад у правой грудной. Так бегут с оружием
-       (low ready): ствол никуда не направлен и не мешает ногам. */
-    const SPRINT = {
-      right: new THREE.Vector3(0.118, 1.345, -0.215),
-      barrel: new THREE.Vector3(-0.26, -0.88, -0.40),
-      out: new THREE.Vector3(0.42, 0.06, -0.9)
-    };
-    const _sl = {
-      m: new THREE.Matrix4(), q: new THREE.Quaternion(), q2: new THREE.Quaternion(),
-      a: new THREE.Vector3(), c: new THREE.Vector3(), r: new THREE.Vector3()
-    };
-    /* Точка хвата в системе узла оружия (w.root) — та же, что берёт риг. */
-    function gripLocal(w, G, side, out) {
-      const node = w.gun.getObjectByName(G.node) || w.gun;
-      w.root.updateMatrixWorld(true);
-      const inv = _sl.m.copy(w.root.matrixWorld).invert();
-      out.setFromMatrixPosition(node.matrixWorld).applyMatrix4(inv);
-      const rel = _sl.q2.copy(w.root.getWorldQuaternion(_sl.q)).invert()
-        .multiply(w.gun.getWorldQuaternion(new THREE.Quaternion()));
-      return out.add(_sl.a.set(G.offset[0] * side, G.offset[1], G.offset[2]).applyQuaternion(rel));
-    }
-    /* Точка правого запястья в системе w.root — та же, что ставит риг. */
-    const AK_RGRIP = root.GAK ? root.GAK.createSpec(root.GAK.createModel()).rightGrip : null;
-    function wristLocal(s, out) {
-      const w = s.gun;
-      if (!AK_RGRIP || !s.char.hands) return gripLocal(w, RIG.GRIP.right, 1, out);
-      /* запястье кисти GLB на рукоятке (хват рига) */
-      const gw = root.GAK.rigGunWorld(w, new THREE.Matrix4()).multiply(AK_RGRIP);
-      return out.setFromMatrixPosition(gw).applyMatrix4(_sl.m.copy(w.root.matrixWorld).invert());
-    }
-    function slingCarry(s, spec) {
-      const SP = spec || SLING;
-      const w = s.gun, chest = s.char.bone('chest'), rest = s.char.rest.chest;
-      chest.updateMatrixWorld(true);
-      const R = SP.right;
-      const RH = chest.localToWorld(_sl.c.set(R.x - rest[0], R.y - rest[1], R.z - rest[2])).clone();
-      const cq = chest.getWorldQuaternion(new THREE.Quaternion());
-      const rL = wristLocal(s, _sl.r);
-      /* базис (ствол, правый бок) оружия -> тот же базис в системе груди */
-      const basis = (f, x) => {
-        f.normalize();
-        x.addScaledVector(f, -x.dot(f)).normalize();
-        return new THREE.Matrix4().makeBasis(f, x, new THREE.Vector3().crossVectors(f, x));
-      };
-      const Bl = basis(new THREE.Vector3(0, 0, -1), new THREE.Vector3(1, 0, 0));
-      const Bw = basis(SP.barrel.clone().applyQuaternion(cq), SP.out.clone().applyQuaternion(cq));
-      const quat = new THREE.Quaternion().setFromRotationMatrix(Bw.multiply(Bl.invert()));
-      const pos = RH.sub(rL.clone().applyQuaternion(quat));
-      return { pos, quat };
-    }
-
-    /* Ось прицеливания АК-74 по обмеру модели: целик и мушка на y=116 мм.
-       Чтобы в прицеле мушка легла в прорезь, глаз ставится на продолжение
-       этой линии позади целика. */
-    const IRON = {
-      rear: new THREE.Vector3(0, 0.116, -0.2485),
-      front: new THREE.Vector3(0, 0.116, -0.626),
-      /* Вынос глаза за целик, м. Реальный вынос на АК — около 0,30 м. */
-      relief: 0.300,
-      /* Небольшой подъём глаза над прицельной линией: щека лежит на гребне
-         приклада, а взгляд идёт чуть сверху через прорезь целика. */
-      rise: 0.010
-    };
-    /* Дистанция сведения ствола с линией взгляда, м. Соответствует
-       постоянному прицелу АК-74: на этой дальности пуля идёт точно в точку
-       прицеливания. */
-    const CONVERGE = 100;
-
-    function placeWeapon(s, dt, isActive, camPos, camQuat, pose) {
-      const c = s.ctrl, w = s.gun;
-      const moveAmt = pose.moveAmt;
-
-      /* Инерция наводки: сглаженные yaw/pitch отстают от реальных. */
-      c.lagYaw = U.dampAngle(c.lagYaw, c.yaw, U.lerp(11, 20, c.ads), dt);
-      c.lagPitch = U.damp(c.lagPitch, c.pitch, U.lerp(12, 22, c.ads), dt);
-
-      /* смесь póz: бедро -> прицел, плюс спринт и перезарядка */
-      const kAds = U.smoothstep(c.ads);
-      const kSprint = U.smoothstep(c.sprint);
-      const kReload = c.reload >= 0 ? U.smoothstep(U.clamp01(c.reload / 0.25)) *
-        U.smoothstep(U.clamp01((( c.reloadWasEmpty ? c.PHYS && 3.05 : 2.45) - c.reload) / 0.3)) : 0;
-
-      /* Неуправляемый боец стоит в положении «на ремне», управляемый —
-         держит оружие наготове. Переход плавный: сглаженная величина ready
-         живёт в контроллере и меняется при захвате/освобождении. */
-      c.ready = U.damp(c.ready === undefined ? (isActive ? 1 : 0) : c.ready,
-        isActive ? 1 : 0, 6, dt);
-      const kReady = U.smoothstep(c.ready);
-      /* строй «на ремне» подмешивается в конце (slingCarry), от груди */
-      const p = new THREE.Vector3().copy(HIP_POSE.pos);
-      const r = new THREE.Euler(HIP_POSE.rot.x, HIP_POSE.rot.y, HIP_POSE.rot.z);
-      const mixPose = (target, k) => {
-        if (k <= 0.001) return;
-        p.lerp(target.pos, k);
-        r.x = U.lerp(r.x, target.rot.x, k);
-        r.y = U.lerp(r.y, target.rot.y, k);
-        r.z = U.lerp(r.z, target.rot.z, k);
-      };
-      mixPose(ADS_POSE, kAds);
-      /* спринт больше не крутит оружие от глаз (дуло уходило вправо):
-         его поза — от груди, см. SPRINT ниже */
-      mixPose(RELOAD_POSE, kReload * (1 - kAds));
-
-      /* покачивание от шага: оружие ходит по «восьмёрке» */
-      const bob = U.lerp(0.9, 0.22, kAds) * (1 - kSprint * 0.3);
-      p.x += Math.sin(c.bobPhase) * 0.017 * moveAmt * bob;
-      p.y += Math.sin(c.bobPhase * 2 + 0.5) * 0.013 * moveAmt * bob;
-      p.z += Math.sin(c.bobPhase * 2) * 0.008 * moveAmt * bob;
-
-      /* дыхание: медленное плавание ствола, заметное в прицеле */
-      const brAmp = U.lerp(0.0016, 0.0075, 1 - c.stamina / c.PHYS.staminaMax) * U.lerp(1, 1.5, kAds);
-      p.x += Math.sin(c.breathT * 0.9) * brAmp;
-      p.y += Math.sin(c.breathT * 1.5 + 1.1) * brAmp * 1.3;
-
-      /* инерция поворота: ствол «отстаёт» и качается */
-      const lagY = U.wrapPI(c.lagYaw - c.yaw);
-      const lagP = c.lagPitch - c.pitch;
-      r.y += clamp(lagY * U.lerp(1.5, 0.45, kAds), -0.5, 0.5);
-      r.x += clamp(-lagP * U.lerp(1.2, 0.35, kAds), -0.4, 0.4);
-      r.z += clamp(lagY * U.lerp(1.1, 0.25, kAds), -0.35, 0.35);
-      p.x += clamp(-lagY * 0.10, -0.05, 0.05);
-      p.y += clamp(lagP * 0.06, -0.04, 0.04);
-
-      /* наклон корпуса Q/E */
-      r.z += c.lean * 0.10;
-      p.x += c.lean * 0.035;
-
-      /* осмотр оружия (V): поворот в руках */
-      if (c.inspect >= 0) {
-        const u = U.clamp01(c.inspect / 2.3);
-        const env = Math.sin(Math.PI * u);
-        r.y += env * 0.95;
-        r.z += env * 0.55;
-        r.x += env * 0.30;
-        p.y += env * 0.045;
-        p.z += env * 0.075;
-      }
-
-      /* В прицеле «характерные» углы удержания почти полностью гасятся:
-         приклад в плече, щека на гребне — оружие жёстко зафиксировано.
-         Остаётся лишь малая доля, чтобы дыхание и шаг всё же читались. */
-      if (kAds > 0.001) {
-        const keep = U.lerp(1, 0.10, kAds);
-        r.x *= keep; r.y *= keep; r.z *= keep;
-      }
-
-      /* --- итоговый трансформ в мировых координатах --- */
-      /* База: точка глаз бойца с его ориентацией взгляда. */
-      const eyeQ = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(c.pitch, c.yaw, c.lean * -0.10, 'YXZ'));
-      const eyePos = eyePosition(s);
-
-      /* Базис УДЕРЖАНИЯ отличается от базиса ВЗГЛЯДА.
-
-         Раньше оружие подвешивалось прямо к взгляду, поэтому при наклоне
-         головы вниз оно ныряло внутрь бойца: игрок смотрел под ноги и видел
-         ствол, торчащий из собственной груди.
-
-         У человека так не бывает: голова поворачивается в шее свободно, а
-         оружие держат РУКИ, привязанные к корпусу. Корпус доворачивается
-         вслед за взглядом лишь частично и в ограниченном диапазоне. Поэтому
-         от бедра берём долю наклона, а в прицеле — полный: там щека на
-         прикладе, и голова с оружием действительно составляют одно целое. */
-      const carryPitch = U.lerp(
-        clamp(c.pitch * 0.42, -0.42, 0.34), c.pitch, U.smoothstep(kAds));
-      const holdBaseQ = new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(carryPitch, c.yaw, c.lean * -0.10, 'YXZ'));
-
-      /* Сведение оружия.
-         Ствол вынесен вправо-вниз от глаза, поэтому если просто повернуть
-         его параллельно взгляду, пули уйдут мимо точки прицеливания. Как и
-         на реальном оружии, ось канала ствола сводится со линией взгляда на
-         дистанции пристрелки: тогда куда смотрю — туда и попадаю, а сама
-         модель остаётся правдоподобно смещённой.
-
-         Углы позы (r) после этого — только «характер» удержания: увод от
-         инерции, покачивание, наклон. Разворот на 15° вбок, из-за которого
-         пули летели криво, больше не применяется к оси ствола. */
-
-      /* Ориентация удержания. В прицеле углы «характера» гасятся: оружие
-         должно встать ровно по линии взгляда, иначе целик уедет вбок. */
-      const holdQ = holdBaseQ.clone().multiply(new THREE.Quaternion().setFromEuler(
-        new THREE.Euler(r.x, r.y, r.z, 'YXZ')));
-      w.root.quaternion.copy(holdQ);
-
-      /* Положение. От бедра — заданное смещение от глаза. В прицеле
-         считаем иначе: берём точку выноса глаза на оси целик-мушка и
-         двигаем оружие так, чтобы она совпала с глазом. Смещение
-         поворачивается УЖЕ СОБРАННЫМ кватернионом оружия — раньше здесь
-         стоял кватернион взгляда, и остаточный поворот позы уводил целик
-         в сторону (те самые 1,9°). */
-      /* Точка подвеса тоже считается в базисе удержания: иначе оружие
-         осталось бы висеть перед глазами и «ездило» бы по экрану. */
-      const hipPos = eyePos.clone().add(p.clone().applyQuaternion(holdBaseQ));
-      let worldPos = hipPos;
-      if (kAds > 0.001) {
-        const axis = new THREE.Vector3().subVectors(IRON.rear, IRON.front).normalize();
-        const eyeLocal = IRON.rear.clone().addScaledVector(axis, IRON.relief);
-        eyeLocal.y += IRON.rise;
-        const adsPos = eyePos.clone()
-          .sub(eyeLocal.clone().applyQuaternion(w.root.quaternion));
-        worldPos = hipPos.lerp(adsPos, kAds);
-      }
-      w.root.position.copy(worldPos);
-      w.root.updateMatrixWorld(true);
-
-      /* ...а затем доворачиваем оружие так, чтобы ствол смотрел в точку
-         сведения на линии взгляда. Доворот считается от фактического
-         положения дульного среза, поэтому работает при любой позе. */
-      const conv = eyePos.clone().addScaledVector(
-        new THREE.Vector3(0, 0, -1).applyQuaternion(eyeQ), CONVERGE);
-      const muzzleW = w.gun.localToWorld(w.muzzleLocal.clone());
-      const wantDir = conv.clone().sub(muzzleW).normalize();
-      const curDir = new THREE.Vector3(0, 0, -1)
-        .applyQuaternion(w.gun.getWorldQuaternion(new THREE.Quaternion())).normalize();
-      /* от бедра сводим лишь частично: оружие у пояса и не должно выглядеть
-         «вклеенным» в центр экрана, а в прицеле — точно по оси */
-      const aimK = U.lerp(0.82, 1.0, kAds) * kReady;
-      const align = new THREE.Quaternion().setFromUnitVectors(curDir, wantDir);
-      if (aimK < 1) {
-        align.slerp(new THREE.Quaternion(), 1 - aimK);
-      }
-      /* Предел доворота от бедра.
-
-         Сведение тянет ствол в точку прицеливания, и без ограничителя оно
-         возвращало ровно ту проблему, ради которой оружие сняли со взгляда:
-         глядя под ноги, боец доворачивал ствол на 70° вниз и загонял его
-         себе в грудь. Человек так не делает — он опускает голову, а оружие
-         остаётся перед корпусом. Поэтому от бедра доворот ограничен 14°;
-         в прицеле ограничение снимается, там ствол обязан стоять точно по
-         линии прицеливания. */
-      const maxTurn = U.lerp(0.25, Math.PI, U.smoothstep(kAds));
-      const turn = 2 * Math.acos(clamp(Math.abs(align.w), -1, 1));
-      if (turn > maxTurn) align.slerp(new THREE.Quaternion(), 1 - maxTurn / turn);
-      w.root.quaternion.premultiply(align);
-
-      if (kReady < 0.999) {
-        const sc = slingCarry(s);
-        w.root.position.lerp(sc.pos, 1 - kReady);
-        w.root.quaternion.slerp(sc.quat, 1 - kReady);
-      }
-      /* бег: ствол вниз, автомат пружинит в такт шагам */
-      const kSpr = kSprint * (1 - kAds) * kReady * (1 - kReload);
-      if (kSpr > 0.001) {
-        const sc = slingCarry(s, SPRINT);
-        const ph = c.bobPhase;
-        sc.quat.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(
-          Math.sin(ph * 2 + 0.6) * 0.045, Math.sin(ph + 0.3) * 0.035, Math.sin(ph) * 0.03)));
-        sc.pos.y += Math.sin(ph * 2 + 1.1) * 0.012;
-        w.root.position.lerp(sc.pos, kSpr);
-        w.root.quaternion.slerp(sc.quat, kSpr);
-      }
-
-      /* Отдача самого оружия: отход назад по оси ствола, подброс и увод.
-         Это видимая часть; вторая часть отдачи уходит в угол взгляда
-         (см. P.fire) — именно она сбивает прицел при очереди. */
-      w.recoilRig.position.set(0, 0, c.recoilBack.x);
-      w.tiltRig.rotation.set(c.recoil.x * 0.85, c.recoilYaw.x * 0.6, c.recoilYaw.x * 1.1);
-      w.root.updateMatrixWorld(true);
+      const c = s.ctrl;
+      return s.pose.update(dt, {
+        x: c.pos.x, y: c.pos.y, z: c.pos.z, yaw: c.yaw, vx: c.vel.x, vz: c.vel.z,
+        speed: c.speed, crouch: c.crouch, aimYaw: c.yaw, aimPitch: c.pitch, t,
+        ready: c.ready || 0, ads: c.ads, lean: c.lean, sprint: c.sprint,
+        fatigue: 1 - c.stamina / c.PHYS.staminaMax, stepPhase: c.stepPhase, breathT: c.breathT,
+        idle: isActive ? 0.35 : 1, look: !isActive, groundAt: c.groundAt
+      });
     }
 
     /* Позиция глаз бойца: следует из позы, а не задаётся отдельно —
@@ -1193,9 +944,9 @@
        Хитскан по прямой — это и есть «стрельба лазером»: на 30 м падение
        уже 4 см, на 100 м — 35 см, и без него дистанции теряют смысл.
        Считаем полёт шагами и проверяем каждый отрезок на попадание. */
-    function traceBullet(origin, dir, objs, targets) {
+    function traceBullet(origin, dir, objs, targets, v0) {
       const pos = origin.clone();
-      const vel = dir.clone().multiplyScalar(MUZZLE_VEL);
+      const vel = dir.clone().multiplyScalar(v0 || MUZZLE_VEL);
       const step = 1 / 240;                   // шаг интегрирования, с
       const maxT = 0.45;                      // дальше 200 м не считаем
       const seg = new THREE.Vector3();
@@ -1221,85 +972,67 @@
       return { hit: null, target: false, end: pos };
     }
 
+
+    /* Выстрел из сборки генерала: дульный срез anchors.muzzle, ось ствола
+       (-Z сборки), разброс контроллера; дробь — несколько картечин. */
+    const _mz = new THREE.Vector3();
     function shootRay(s) {
-      const c = s.ctrl, w = s.gun;
-      w.root.updateMatrixWorld(true);
+      const c = s.ctrl, b = s.build;
+      if (!b) return;
+      b.root.updateMatrixWorld(true);
+      const st = b.stats || {};
+      const origin = b.root.localToWorld(_mz.copy(b.anchors.muzzle)).clone();
+      const wq = b.root.getWorldQuaternion(new THREE.Quaternion());
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(wq).normalize();
+      const v0 = st.velocity || MUZZLE_VEL;
 
-      /* точка вылета — дульный срез с учётом установленного ДТК */
-      const asm = C.getAsm();
-      const mz = (asm && asm.nodes && asm.nodes.muzzle)
-        ? new THREE.Vector3(asm.nodes.muzzle[0] * 0.001, asm.nodes.muzzle[1] * 0.001, asm.nodes.muzzle[2] * 0.001)
-        : w.muzzleLocal.clone();
-      const origin = w.gun.localToWorld(mz.clone());
-
-      /* направление: ось ствола + разброс.
-         Важно: стреляем ТУДА, КУДА СМОТРИТ СТВОЛ, а не в центр экрана —
-         иначе теряется смысл прицеливания и отдачи. */
-      const dir = new THREE.Vector3(0, 0, -1)
-        .applyQuaternion(w.gun.getWorldQuaternion(new THREE.Quaternion())).normalize();
-      const sp = c.spread;
-      if (sp > 0) {
-        /* равномерное распределение в конусе */
-        const a = Math.random() * Math.PI * 2;
-        const rr = Math.sqrt(Math.random()) * sp;
-        const up = new THREE.Vector3(0, 1, 0);
-        const side = new THREE.Vector3().crossVectors(dir, up).normalize();
-        const up2 = new THREE.Vector3().crossVectors(side, dir).normalize();
-        dir.addScaledVector(side, Math.cos(a) * rr).addScaledVector(up2, Math.sin(a) * rr).normalize();
-      }
-
-      /* вспышка и гильза */
       fx.flashRig.position.copy(origin);
-      fx.flashRig.quaternion.copy(w.gun.getWorldQuaternion(new THREE.Quaternion()));
+      fx.flashRig.quaternion.copy(wq);
       fx.muzzleFlash(1);
-      fx.smoke(origin, 2, dir.clone().multiplyScalar(1.4), 0.07);
-
-      const ejPos = w.gun.localToWorld(w.ejectLocal.clone());
-      const wq = w.gun.getWorldQuaternion(new THREE.Quaternion());
+      fx.smoke(origin, 2, fwd.clone().multiplyScalar(1.4), 0.07);
+      const ejPos = b.root.localToWorld(b.anchors.magwell.clone().add(new THREE.Vector3(0.02, 0.05, 0.03)));
       const ejDir = new THREE.Vector3(0.86, 0.46, 0.22).normalize().applyQuaternion(wq);
       fx.ejectCase(ejPos, ejDir, new THREE.Vector3(0, 1, 0));
-
       audio.shot({ vol: 1 });
 
-      /* --- трассировка --- */
       hitTargets.length = 0;
       for (const t of world.targets) if (t.state !== 'down') hitTargets.push(t.board);
       const objs = [world.ground];
-      if (world.house) objs.push(world.house);
-      if (world.props) objs.push(world.props);
-      if (world.fence) objs.push(world.fence);
-      if (world.range) objs.push(world.range);
-      if (world.garden) objs.push(world.garden);
+      for (const k of ['house', 'props', 'fence', 'range', 'garden']) if (world[k]) objs.push(world[k]);
 
-      let hit = null, hitKind = 'ground', hitTarget = null;
-
-      /* Пуля летит по параболе с учётом сопротивления воздуха. */
-      const shot = traceBullet(origin, dir, objs, hitTargets);
-      if (shot.hit) {
-        hit = shot.hit;
-        if (shot.target) {
-          hitKind = 'target';
-          hitTarget = world.targets.find((x) => x.board === hit.object);
-        } else {
-          const n = (hit.object.name || '') + '|' + ((hit.object.parent && hit.object.parent.name) || '');
-          if (hit.object === world.ground) hitKind = 'ground';
-          else if (/fence|house|props|log|tree|bush/i.test(n)) hitKind = 'wood';
-          else hitKind = 'metal';
+      const pellets = Math.max(1, st.pellets || 1);
+      const up = new THREE.Vector3(0, 1, 0);
+      const side = new THREE.Vector3().crossVectors(fwd, up).normalize();
+      const up2 = new THREE.Vector3().crossVectors(side, fwd).normalize();
+      for (let k = 0; k < pellets; k++) {
+        const dir = fwd.clone();
+        /* картечь 00: ~2,5 см на метр */
+        const sp = pellets > 1 ? Math.max(c.spread, 0.025) : c.spread;
+        if (sp > 0) {
+          const a = Math.random() * Math.PI * 2;
+          const rr = Math.sqrt(Math.random()) * sp;
+          dir.addScaledVector(side, Math.cos(a) * rr).addScaledVector(up2, Math.sin(a) * rr).normalize();
         }
-      }
-
-      const end = hit ? hit.point : (shot.end || origin.clone().addScaledVector(dir, 140));
-      /* Трассер летит со скоростью пули от дульного среза к точке попадания. */
-      fx.tracer(origin.clone().addScaledVector(dir, 0.35), end, 1, MUZZLE_VEL);
-
-      if (hit) {
-        const nrm = hit.face
-          ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
-          : dir.clone().negate();
-        if (hitTarget) {
-          registerTargetHit(s, hitTarget, hit, nrm);
-        } else {
-          fx.impact(hit.point, nrm, hitKind, null);
+        let hit = null, hitKind = 'ground', hitTarget = null;
+        const shot = traceBullet(origin, dir, objs, hitTargets, v0);
+        if (shot.hit) {
+          hit = shot.hit;
+          if (shot.target) {
+            hitKind = 'target';
+            hitTarget = world.targets.find((x) => x.board === hit.object);
+          } else {
+            const n = (hit.object.name || '') + '|' + ((hit.object.parent && hit.object.parent.name) || '');
+            if (hit.object === world.ground) hitKind = 'ground';
+            else if (/fence|house|props|log|tree|bush/i.test(n)) hitKind = 'wood';
+            else hitKind = 'metal';
+          }
+        }
+        const end = hit ? hit.point : (shot.end || origin.clone().addScaledVector(dir, 140));
+        if (k < 3) fx.tracer(origin.clone().addScaledVector(dir, 0.35), end, 1, v0);
+        if (hit) {
+          const nrm = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : dir.clone().negate();
+          if (hitTarget && hitTarget.state !== 'falling' && hitTarget.state !== 'down') registerTargetHit(s, hitTarget, hit, nrm);
+          else fx.impact(hit.point, nrm, hitTarget ? 'target' : hitKind, hitTarget ? hitTarget.hinge : null);
         }
       }
     }
@@ -1350,72 +1083,15 @@
       }
     }
 
-    /* Теперь, когда трассировка пули собрана, подключаем её к контроллерам:
-       каждый выстрел бойца рождает луч, вспышку, гильзу и звук. */
+
     for (const s of squad) s.ctrl.onFire = () => shootRay(s);
 
-    return finishLoop(C, {
-      poseSoldier, placeWeapon, eyePosition, shootRay, updateTargets, SLING,
-      /* баллистика нужна отладочным хукам в finishLoop */
-      MUZZLE_VEL, DRAG
-    });
-  }
-
-  /* ================================================ КАМЕРА И КАДР ===== */
-  function finishLoop(C, F) {
-    const { THREE, renderer, scene, camera, world, fx, audio, squad, sun,
-      S, input, ui, toast, active, updateFree, updateUse, syncAmmoCap } = C;
-    const clamp = U.clamp;
-
-    /* Нагрудная камера и руки рига от первого лица (game/bodycam.js). */
+    /* Нагрудная камера и руки рига от первого лица (game/bodycam.js):
+       риг ведёт сборку генерала, без оружия — только камера. */
     const BC = root.GBodycam ? root.GBodycam.create({ scene, camera }) : null;
-    const AKA = root.GAK;
-    const NPC_SPEC = BC ? BC.spec : null;
-    const _gw = new THREE.Matrix4();
-    /* Кисти GLB у бойцов со стороны: хват из спеки рига на их АК. */
-    function npcHands(s) {
-      if (!NPC_SPEC || !s.char.hands) { s.rig.handTargets = null; return; }
-      const H = s.rig.handTargets || (s.rig.handTargets = { R: new THREE.Matrix4(), L: new THREE.Matrix4() });
-      AKA.rigGunWorld(s.gun, _gw);
-      H.R.multiplyMatrices(_gw, NPC_SPEC.rightGrip);
-      H.L.multiplyMatrices(_gw, NPC_SPEC.leftGrip);
-      s.rig.handPoses = { R: NPC_SPEC.hands.indexed, L: NPC_SPEC.hands.support };
-    }
     const bodycamMode = (i) => (BC && i === S.activeIdx ? (S.tp || S.spectate ? 'tp' : 'fp') : null);
     let lensAmt = 0;
 
-    /* Панель модулей (TAB) из исходного файла оружия. */
-    ATTACH_STATE.apply = (slotKey, moduleKey) => {
-      ATTACH_STATE.ui && ATTACH_STATE.ui.markStats();
-      ATTACH_STATE.config[slotKey] = moduleKey;
-      const a = active();
-      const asm = attachToGun(THREE, (a || squad[0]).gun);
-      C.setAsm(asm);
-      syncAmmoCap();
-      ATTACH_STATE.ui && ATTACH_STATE.ui.render();
-    };
-    ATTACH_STATE.ui = createCustomizer({
-      getConfig: () => ATTACH_STATE.config,
-      getSlots: () => attachSlots(),
-      getStats: () => (C.getAsm() ? C.getAsm().derived : {}),
-      getWarnings: () => (C.getAsm() ? C.getAsm().warnings : []),
-      optionsFor: attachOptionsFor,
-      nameOf: attachNameOf,
-      setModule: ATTACH_STATE.apply
-    });
-    ATTACH_STATE.ui.render();
-    ATTACH_STATE.ui.toggle(false);
-    attachBindKeys(ATTACH_STATE.apply);
-
-    /* Когда панель открыта — освобождаем курсор, иначе по ней не кликнуть. */
-    const origToggle = ATTACH_STATE.ui.toggle;
-    ATTACH_STATE.ui.toggle = (on) => {
-      origToggle(on);
-      const vis = ATTACH_STATE.ui.visible();
-      C.setCustOpen(vis);
-      if (vis && document.pointerLockElement) document.exitPointerLock();
-      else if (!vis && S.started && !document.pointerLockElement) renderer.domElement.requestPointerLock();
-    };
 
     /* ------------------------------------------------------- камера --- */
     /* Три режима:
@@ -1445,7 +1121,7 @@
       }
       if (a) {
         const c = a.ctrl;
-        const eye = F.eyePosition(a);
+        const eye = eyePosition(a);
         /* Отдача бьёт в камеру слабее, чем в оружие: голова гасит часть. */
         const recPitch = c.recoil.x * 0.30;
         const recYaw = c.recoilYaw.x * 0.22;
@@ -1519,7 +1195,7 @@
        теней всегда покрывала окрестность с высоким разрешением. */
     function updateSun() {
       const p = camera.position;
-      sun.position.set(p.x + C.sunDir.x * 40, C.sunDir.y * 40 + 6, p.z + C.sunDir.z * 40);
+      sun.position.set(p.x + sunDir.x * 40, sunDir.y * 40 + 6, p.z + sunDir.z * 40);
       sun.target.position.set(p.x, 0, p.z);
       sun.target.updateMatrixWorld();
     }
@@ -1544,125 +1220,169 @@
       }
     }
 
-    /* ------------------------------------------------- запуск игры ---- */
-    ui.loading.textContent = 'ГОТОВО';
-    ui.loading.style.opacity = '0.5';
 
-    const beginGame = () => {
-      if (S.started) return;
-      S.started = true;
-      ui.start.classList.add('hidden');
-      audio.init();
-      audio.resume();
-      renderer.domElement.requestPointerLock();
-      toast('ПОДОЙДИТЕ К ОПЕРАТОРУ И УДЕРЖИТЕ F', 3200);
-    };
-    ui.start.addEventListener('click', beginGame);
-    window.addEventListener('keydown', (e) => {
-      if (!S.started && (e.code === 'Enter' || e.code === 'Space')) beginGame();
-      if (e.code === 'Space') S.spaceUp = true;
-    });
-    window.addEventListener('keyup', (e) => { if (e.code === 'Space') S.spaceUp = false; });
+    /* Смещение кадра под правую панель: генералы — в центре левой части. */
+    function applyViewOffset(dt) {
+      const want = S.menu && S.mode === 'free' && !S.spectate ? 1 : 0;
+      S.menuK = U.damp(S.menuK, want, 5, dt);
+      const off = S.menuK * panelW * 0.5;
+      if (off > 0.5) camera.setViewOffset(window.innerWidth, window.innerHeight, off, 0, window.innerWidth, window.innerHeight);
+      else if (camera.view && camera.view.enabled) camera.clearViewOffset();
+    }
 
     /* гильза, упавшая на землю — звук */
     fx.onCaseLand = (v) => audio.caseHit(v);
 
     /* ------------------------------------------------------- кадр ----- */
-    /* Шаг симуляции вынесен из кадра: он детерминирован и не зависит от
-       того, как быстро рисует видеокарта. Благодаря этому автотесты гоняют
-       логику фиксированными шагами, а не «ждут» реальные кадры. */
+    /* Шаг симуляции отделён от рендера: автотесты гоняют его фиксированными шагами. */
     function step(dt) {
       if (dt > 0.05) dt = 0.05;
       if (dt <= 0) dt = 1 / 120;
       S.time += dt;
       const t = S.time;
-
-      const locked = S.pointerLocked && !C.isCustOpen();
+      const control = !S.menu && !blocked();
       const a = active();
 
       /* 1. ввод и физика */
-      if (a) a.ctrl.update(dt, locked ? Object.assign({}, input, { ads: input.ads }) : {}, locked, t);
-      else if (locked) updateFree(dt);
+      if (a) a.ctrl.update(dt, control ? (a.build ? input : Object.assign({}, input, { ads: false })) : {}, control, t);
+      else updateFree(dt);
 
-      /* неактивные бойцы стоят на месте, но дышат */
+      /* камера стоит дольше IDLE_MENU — меню возвращается */
+      if (control && S.mode === 'free') {
+        const moving = MOVE.some((k) => input[k]) || S.spaceUp || input.crouch || S.free.vel.lengthSq() > 0.02;
+        if (moving) S.idleT = 0;
+        else if ((S.idleT += dt) > IDLE_MENU) setMenu(true);
+      }
+
+      /* остальные генералы стоят в строю: дыхание, перенос веса, взгляд */
       for (let i = 0; i < squad.length; i++) {
         const s = squad[i];
         if (i === S.activeIdx) { s.wasActive = true; continue; }
         const c = s.ctrl, k = s.idleSeed;
-        /* Микродвижение в строю: боец переминается, чуть водит стволом и
-           поворачивает голову. Без этого четыре манекена выглядят мёртвыми. */
         const swayYaw = Math.sin(t * 0.21 + k) * 0.045 + Math.sin(t * 0.07 + k * 2) * 0.03;
         const swayPitch = Math.sin(t * 0.17 + k * 1.7) * 0.05 - 0.04;
-        /* Покачивание идёт вокруг курса, с которым бойца ОТПУСТИЛИ. Раньше
-           yaw присваивался от курса спавна: отпущенный боец за один кадр
-           разворачивался до 180°, а оружие, догоняющее взгляд с инерцией,
-           на это время выносило вбок, мимо рук. Выход ловится по факту
-           смены активного бойца — так покрыты и F, и смена бойца, и view. */
+        /* покачивание — вокруг курса, с которым генерала отпустили */
         if (s.wasActive) { s.idleYaw = c.yaw - swayYaw; s.wasActive = false; }
         c.breathT += dt * 0.85;
-        /* Взгляд возвращается к позе покоя плавно, а не скачком. */
         c.yaw = U.dampAngle(c.yaw, s.idleYaw + swayYaw, 3, dt);
         c.pitch = U.damp(c.pitch, swayPitch, 3, dt);
         c.update(dt, {}, false, t);
       }
 
-      /* 2-4. поза, оружие, руки */
+      /* 2-3. поза, оружие, руки */
       for (let i = 0; i < squad.length; i++) {
-        const s = squad[i];
+        const s = squad[i], c = s.ctrl, rig = s.rig;
         const isActive = i === S.activeIdx;
-        const pose = F.poseSoldier(s, dt, isActive, t);
+        c.ready = U.damp(c.ready || 0, isActive && s.build ? 1 : 0, 6, dt);
+        poseSoldier(s, dt, isActive, t);
         s.char.root.updateMatrixWorld(true);
         const mode = bodycamMode(i);
         /* от первого лица тело скрыто: видны руки рига и оружие */
         s.char.root.visible = mode !== 'fp';
         if (mode) {
-          s.ctrl.ready = U.damp(s.ctrl.ready === undefined ? 1 : s.ctrl.ready, 1, 6, dt);
           BC.update(dt, s, mode);
           if (mode === 'tp') {
-            const H = BC.handTargets({});
-            s.rig.handTargets = { R: H.R, L: H.L };
-            s.rig.handPoses = { R: H.poseR, L: H.poseL };
+            if (s.build && s.char.hands) {
+              const H = BC.handTargets({});
+              if (H) {
+                rig.handTargets = { R: H.R, L: H.L };
+                rig.handPoses = { R: H.poseR, L: H.poseL };
+                rig.armPose = null;
+                rig.readyAmount = 1;
+                rig.adsAmount = c.ads;
+                rig.solveArms(null);
+              }
+            } else if (s.hold) s.hold.update(dt, {});
           }
-        } else {
-          F.placeWeapon(s, dt, isActive, camera.position, camera.quaternion, pose);
-          npcHands(s);
+          continue;
         }
-        if (mode === 'fp') continue;
-        /* руки подводятся к уже размещённому оружию */
-        s.rig.triggerCurl = triggerCurlFor(s);
-        s.rig.adsAmount = s.ctrl.ads;
-        s.rig.readyAmount = U.smoothstep(s.ctrl.ready === undefined ? 1 : s.ctrl.ready);
-        s.rig.fingerEvery = isActive ? 1 : 3;
-        s.rig.solveArms(s.gun.gun);
+        if (!s.hold) continue;
+        /* без бодикама генерал держит оружие сам (GHold) */
+        if (isActive) s.hold.setState(c.ads > 0.5 ? 'aim' : 'ready');
+        else s.hold.setState(s.build ? 'low' : 'unarmed');
+        const far = s.char.root.position.distanceTo(camera.position) > IK_FAR;
+        s.hold.update(dt, { yaw: c.yaw, pitch: c.pitch, ik: !far, trigger: isActive ? triggerCurlFor(s) : 0 });
       }
 
-      /* 5. камера */
+      /* 4. камера */
       updateCamera(dt);
+      applyViewOffset(dt);
       if (BC && !(a && !S.tp && !S.spectate)) BC.resetNear();
-      /* линза бодикама — только от первого лица */
-      const post = C.getPost && C.getPost();
-      /* включается плавно, выключается сразу — иначе при переходе на вид
-         со стороны кадр смазывается «хвостом» линзы */
+      /* линза бодикама — только от первого лица: включается плавно, выключается сразу */
       const lensOn = !!(a && BC && !S.tp && !S.spectate);
       lensAmt = lensOn ? U.damp(lensAmt, 1, 10, dt) : 0;
-      if (post && post.lens) {
-        const lu = post.lens.uniforms;
-        post.lens.enabled = lensAmt > 0.005;
+      if (POST && POST.lens) {
+        const lu = POST.lens.uniforms;
+        POST.lens.enabled = lensAmt > 0.005;
         lu.uAmt.value = lensAmt;
         lu.uTime.value = t;
-        if (post.lens.enabled) lu.uShift.value.copy(BC.measureShift());
+        if (POST.lens.enabled) lu.uShift.value.copy(BC.measureShift());
       }
       updateSelfVisibility();
       updateSun();
+      updateLabels(t);
 
-      /* 6. мир и эффекты */
-      F.updateTargets(dt);
+      /* 5. мир и эффекты */
+      updateTargets(dt);
       if (world.grassMat && world.grassMat.userData.sh)
         world.grassMat.userData.sh.uniforms.uTime.value = t;
       fx.update(dt, 0);
-      if (locked || !S.started) updateUse(dt);
-      else ui.prompt.classList.remove('on');
+      if (control) updateUse(dt);
+      else { ui.prompt.classList.remove('on'); S.holdF = 0; }
       updateHUD(dt);
+    }
+
+    /* Указательный палец: лежит на спуске, дожимает при выстреле. */
+    function triggerCurlFor(s) {
+      const c = s.ctrl;
+      if (!s.build || (c.ready !== undefined && c.ready < 0.5) || c.fireMode === 'safe') return 0.08;
+      const firing = (performance.now() / 1000 - c.lastShot) < 0.06;
+      if (firing || (c.triggerHeld && c.ammo > 0)) return 1.08;
+      return c.ads > 0.5 && c.sprint < 0.3 ? 0.82 : 0.08;
+    }
+
+    /* ------------------------------------------------ настройки ------- */
+    function applySettings(p) {
+      prof = p;
+      cmap = PROF.codeMap(p);
+      if (p.settings.quality !== qualityNow) applyQuality(p.settings.quality);
+      S.free.fov = p.settings.fov;
+      /* бодикам шире: линза «рыбий глаз» съедает края кадра */
+      if (BC) BC.P.fov = p.settings.fov + 16;
+      if (audio.setVolume) audio.setVolume(p.settings.volume);
+      lobby && lobby.refresh();
+    }
+
+    lobby = root.GLobby ? root.GLobby.create({
+      profile: PROF, toast,
+      getSelected: () => S.selected,
+      setSelected: (k) => select(k),
+      weaponOf: (k) => { const s = squad.find((x) => x.key === k); return s && s.build ? s.wtitle : null; },
+      labelOf: (k) => { const s = squad.find((x) => x.key === k); return s ? s.label : null; },
+      onSettings: applySettings,
+      onModal: (open) => { if (open) releaseAll(); }
+    }) : null;
+    applySettings(prof);
+
+    /* снаряжение могли поменять в оружейной (возврат «назад», другая вкладка) */
+    window.addEventListener('pageshow', (e) => { if (e.persisted) armAll(); });
+    window.addEventListener('storage', (e) => { if (e.key === PROF.KEY) { armAll(); applySettings(PROF.load()); } });
+
+    /* ------------------------------------------------- запуск --------- */
+    const fromArmory = /[?&]from=armory\b/.test(location.search);
+    const armed0 = armAll();
+    let frames = 0;
+    function onReady() {
+      S.ready = true;
+      ui.loading.textContent = 'ГОТОВО';
+      ui.loader.classList.add('done');
+      setTimeout(() => { ui.loader.style.display = 'none'; }, 700);
+      lobby && lobby.refresh();
+      if (!lobby) return;
+      setTimeout(() => {
+        if (lobby.tutorial()) return;
+        if (fromArmory && S.selected) lobby.armoryHint(S.selected);
+      }, 500);
     }
 
     let prev = performance.now();
@@ -1672,44 +1392,44 @@
       const dt = (now - prev) / 1000;
       prev = now;
       if (!S.paused) step(dt);
-      if (C.renderFrame) C.renderFrame(dt);
-      else renderer.render(scene, camera);
+      if (!S.noRender) renderFrame(dt);
+      /* загрузка скрывается после первых кадров и сборки оружия (не дольше 15 с) */
+      if (++frames === 2) Promise.race([armed0, new Promise((r) => setTimeout(r, 15000))]).then(onReady);
     };
-
-    /* Указательный палец: лежит на спуске, дожимает при выстреле. */
-    function triggerCurlFor(s) {
-      const c = s.ctrl;
-      /* Палец вне скобы, вдоль ствольной коробки (< 0,5), пока боец не
-         стреляет и не целится: на ремне, на предохранителе, на бегу. */
-      if (c.ready !== undefined && c.ready < 0.5) return 0.08;
-      if (c.fireMode === 'safe') return 0.08;
-      const firing = (performance.now() / 1000 - c.lastShot) < 0.06;
-      const held = c.triggerHeld && c.ammo > 0;
-      if (firing || held) return 1.08;
-      return c.ads > 0.5 && c.sprint < 0.3 ? 0.82 : 0.08;
-    }
-
     tick();
 
+
     /* ------------------------------------------- отладочные хуки ------ */
-    /* Используются автотестами (tools/test). */
+    /* Используются автотестами (tools/shots.mjs, headless). */
     window.__GAME = {
-      state: S, squad, world, camera, scene, renderer, fx, audio, sling: F.SLING,
+      state: S, squad, world, camera, scene, renderer, fx, audio, lobby, PROF,
       /* Прогон симуляции без рендера: n шагов по dt секунд. */
       step: (n, dt) => { for (let i = 0; i < (n || 1); i++) step(dt || 1 / 60); return S.time; },
-      /* Снижение пули на заданных дистанциях: стреляем горизонтально из
-         точки без препятствий и смотрим, на сколько траектория ушла вниз. */
+      ready: () => S.ready,
+      /* съёмка проверок: freeze(true) перестаёт рисовать кадры (под SwiftShader
+         кадр идёт секунды, и DOM на скриншоте отстаёт), frame() — один кадр */
+      freeze: (on) => { S.noRender = !!on; return S.noRender; },
+      frame: () => { renderFrame(1 / 60); return true; },
+      menu: (on) => { if (on !== undefined) setMenu(on); return S.menu; },
+      select, armAll, applySettings,
+      profile: () => PROF.load(),
+      /* настоящая клавиша: проходит через привязки профиля и перехват лобби */
+      key: (code, down) => {
+        window.dispatchEvent(new KeyboardEvent(down === false ? 'keyup' : 'keydown', { code, bubbles: true }));
+        return { menu: S.menu, mode: S.mode };
+      },
+
       measureDrop: (dists) => {
         const org = new THREE.Vector3(0, 50, 0);           // высоко, чтобы ничего не мешало
         const dir = new THREE.Vector3(0, 0, -1);
         return (dists || [10, 30, 100]).map((d) => {
           /* та же схема интегрирования, что и в traceBullet */
-          const vel = dir.clone().multiplyScalar(F.MUZZLE_VEL);
+          const vel = dir.clone().multiplyScalar(MUZZLE_VEL);
           const pos = org.clone();
           const h = 1 / 480;
           while (org.z - pos.z < d) {
             const v = vel.length();
-            vel.addScaledVector(vel, -F.DRAG * v * h);
+            vel.addScaledVector(vel, -DRAG * v * h);
             vel.y -= 9.81 * h;
             pos.addScaledVector(vel, h);
             if (org.y - pos.y > 50) break;
@@ -1717,105 +1437,46 @@
           return { dist: d, drop: +(org.y - pos.y).toFixed(4) };
         });
       },
-      /* Управление вводом из автотестов: позволяет проверить полную цепочку
-         «клавиша -> контроллер -> выстрел -> попадание», а не только её конец.
-         pointerLocked имитирует захват курсора, которого нет в headless. */
+      /* Прямое управление вводом: lock имитирует захват курсора (в headless его нет). */
       setInput: (o) => {
-        if (o.lock !== undefined) { S.pointerLocked = !!o.lock; S.started = true; }
+        if (o.lock !== undefined) { S.pointerLocked = !!o.lock; S.started = true; if (o.lock) setMenu(false); }
         for (const k of ['fwd', 'back', 'left', 'right', 'sprint', 'crouch', 'ads', 'leanL', 'leanR'])
           if (o[k] !== undefined) input[k] = o[k];
-        if (o.trigger !== undefined) { const a = active(); a && a.ctrl.pullTrigger(!!o.trigger); }
+        if (o.trigger !== undefined) trigger(!!o.trigger);
         return { locked: S.pointerLocked, input: Object.assign({}, input) };
       },
-      embody: (i) => { S.activeIdx >= 0 && null; C.embody ? C.embody(i) : null; },
       info: () => ({
-        mode: S.mode, activeIdx: S.activeIdx, score: S.score,
+        mode: S.mode, activeIdx: S.activeIdx, selected: S.selected, menu: S.menu, idleT: +S.idleT.toFixed(2),
+        score: S.score, quality: qualityNow,
         camera: camera.position.toArray().map((v) => +v.toFixed(3)),
-        fov: +camera.fov.toFixed(2),
+        fov: +camera.fov.toFixed(2), viewOffset: !!(camera.view && camera.view.enabled),
         targets: world.targets.map((t) => ({ d: t.dist, s: t.state, hits: t.hits })),
         squad: squad.map((s) => ({
-          key: s.key,
+          key: s.key, weapon: s.build ? s.build.id : null, state: s.hold ? s.hold.state : null,
           pos: s.ctrl.pos.toArray().map((v) => +v.toFixed(3)),
-          ammo: s.ctrl.ammo, speed: +s.ctrl.speed.toFixed(3)
+          ammo: s.ctrl.ammo, reserve: s.ctrl.reserve, speed: +s.ctrl.speed.toFixed(3)
         }))
       }),
-      /* геометрия: проверка, что руки реально держат оружие */
+      /* руки держат оружие: запястья у целей GHold, углы в локтях */
       gripCheck: () => squad.map((s) => {
-        const g = s.gun.gun;
-        g.updateMatrixWorld(true);
+        const out = { key: s.key, weapon: s.build ? s.build.id : null, state: s.hold ? s.hold.state : null };
+        if (!s.hold) return out;
         s.char.root.updateMatrixWorld(true);
-        const out = {};
-        /* Меряем до ФАКТИЧЕСКОЙ точки хвата, которую выбрал риг: кисть
-           скользит вдоль цевья под длину руки, поэтому расстояние до
-           исходного узла оружия ничего не доказывало бы. */
-        for (const [bone, SS] of [['palmR', 'R'], ['palmL', 'L']]) {
-          const target = s.rig.gripTarget && s.rig.gripTarget[SS];
-          if (!target) { out[bone] = -1; continue; }
-          const bp = s.char.bone(bone).getWorldPosition(new THREE.Vector3());
-          out[bone] = +bp.distanceTo(target).toFixed(4);
+        const wp = (n) => s.char.bone(n).getWorldPosition(new THREE.Vector3());
+        for (const SS of ['R', 'L']) {
+          const tgt = new THREE.Vector3().setFromMatrixPosition(s.hold.handTargets[SS]);
+          out['wrist' + SS] = +wp('wrist' + SS).distanceTo(tgt).toFixed(4);
         }
-        /* Углы в локтях: у стрелка рабочая рука согнута на 70–95°,
-           опорная — на 100–130°. Прямая или сложенная вдвое рука сразу
-           выдаёт неправильную постановку оружия. */
         const ang = (a, b, c) => {
-          const A = s.char.bone(a).getWorldPosition(new THREE.Vector3());
-          const B = s.char.bone(b).getWorldPosition(new THREE.Vector3());
-          const C = s.char.bone(c).getWorldPosition(new THREE.Vector3());
-          const u = A.sub(B).normalize(), v = C.sub(B).normalize();
+          const u = wp(a).sub(wp(b)).normalize(), v = wp(c).sub(wp(b)).normalize();
           return Math.round(Math.acos(U.clamp(u.dot(v), -1, 1)) * 180 / Math.PI);
         };
         out.elbowR = ang('shoulderR', 'elbowR', 'wristR');
         out.elbowL = ang('shoulderL', 'elbowL', 'wristL');
-        /* насколько далеко кисть от плеча — источник обоих углов */
-        const sh = (n) => s.char.bone(n).getWorldPosition(new THREE.Vector3());
-        out.reachR = +sh('shoulderR').distanceTo(sh('wristR')).toFixed(3);
-        out.reachL = +sh('shoulderL').distanceTo(sh('wristL')).toFixed(3);
-        /* висит ли оружие в воздухе относительно бойца */
-        const chest = s.char.bone('chest').getWorldPosition(new THREE.Vector3());
-        const gunP = s.gun.root.getWorldPosition(new THREE.Vector3());
-        out.gunToChest = +chest.distanceTo(gunP).toFixed(4);
-        /* Постановка рук в системе груди: отведение плеча от корпуса (°) и
-           вынос локтя от оси тела (м). Прижатая к рёбрам рука даёт < 10° и
-           локоть внутри контура туловища. */
-        const cInv = s.char.bone('chest').getWorldQuaternion(new THREE.Quaternion()).invert();
-        const loc = (n) => sh(n).sub(chest).applyQuaternion(cInv);
-        for (const SS of ['R', 'L']) {
-          const sg = SS === 'R' ? 1 : -1;
-          const up = loc('elbow' + SS).sub(loc('shoulder' + SS));
-          out['abduct' + SS] = Math.round(Math.atan2(sg * up.x, -up.y) * 180 / Math.PI);
-          out['elbowOut' + SS] = +(sg * loc('elbow' + SS).x).toFixed(3);
-        }
-        const bq = g.getWorldQuaternion(new THREE.Quaternion());
-        const bd = new THREE.Vector3(0, 0, -1).applyQuaternion(bq);
-        out.gunPitch = Math.round(Math.asin(U.clamp(-bd.y, -1, 1)) * 180 / Math.PI);
-        out.key = s.key;
         return out;
-      }),
-      /* Прицел: опорная кисть не должна подниматься к прицельной линии
-         (0,116 м в системе оружия, верх цевья — 0,112). top — наивысшая
-         точка левой перчатки у цевья в системе оружия, clearance — запас
-         до линии. Вершины считаются линейным скиннингом на CPU: он
-         расходится с шейдерным на миллиметры, запас это покрывает. */
-      sightCheck: (i) => {
-        const s = squad[i === undefined ? Math.max(0, S.activeIdx) : i];
-        const mesh = s.char.meshes.glove;
-        if (!mesh) return null;
-        const g = s.gun.gun;
-        g.updateMatrixWorld(true);
-        s.char.root.updateMatrixWorld(true);
-        const inv = new THREE.Matrix4().copy(g.matrixWorld).invert();
-        const pos = mesh.geometry.attributes.position, v = new THREE.Vector3();
-        let top = -Infinity;
-        for (let k = 0; k < pos.count; k++) {
-          if (pos.getX(k) > 0) continue;                 // левая перчатка: в позе покоя x < 0
-          v.fromBufferAttribute(pos, k);
-          mesh.applyBoneTransform(k, v);
-          v.applyMatrix4(mesh.matrixWorld).applyMatrix4(inv);
-          if (v.z < -0.2) top = Math.max(top, v.y);      // только у цевья
-        }
-        return { key: s.key, ads: +s.ctrl.ads.toFixed(2), top: +top.toFixed(4), clearance: +(0.116 - top).toFixed(4) };
-      }
+      })
     };
+
 
     /* Ручная постановка камеры для съёмки и визуальных проверок:
        __GAME.view([x,y,z], [tx,ty,tz]) — камера в точке, взгляд в цель. */
@@ -1830,13 +1491,13 @@
       S.free.pitch = Math.asin(U.clamp(dir.y, -1, 1));
       camRig.pos.copy(f);
       camRig.quat.setFromEuler(new THREE.Euler(S.free.pitch, S.free.yaw, 0, 'YXZ'));
-      S.free.fov = fov || 0;
+      S.free.fov = fov || prof.settings.fov;
       if (fov) { camRig.fov = fov; camera.fov = fov; camera.updateProjectionMatrix(); }
       return { pos: f.toArray(), yaw: S.free.yaw, pitch: S.free.pitch };
     };
 
     /* Принудительный вход в бойца — для автотестов и съёмки. */
-    window.__GAME.embody = (i) => { C.embodyFn(i); return S.activeIdx; };
+    window.__GAME.embody = (i) => { embody(i); return S.activeIdx; };
     /* Съёмка: spectate([x,y,z], [tx,ty,tz], fov) ставит внешнюю камеру, не
        отнимая управление у бойца; spectate(null) возвращает обычную.
        pause(true) останавливает симуляцию в кадре — дальше step(n, dt). */
@@ -1853,7 +1514,7 @@
     window.__GAME.bodycam = BC;
     window.__GAME.setTP = (on) => { S.tp = !!on; return S.tp; };
 
-    window.__GAME.disembody = () => { C.disembodyFn(); return S.activeIdx; };
+    window.__GAME.disembody = () => { disembody(); return S.activeIdx; };
     window.__GAME.setPose = (o) => {
       const a = active();
       if (!a) return null;
@@ -1868,5 +1529,5 @@
     return window.__GAME;
   }
 
-  return { main, SPAWN, HOLD_TIME, USE_RANGE, buildGun, attachToGun, startLoop, finishLoop };
+  return { main, SPAWN, HOLD_TIME, USE_RANGE };
 });

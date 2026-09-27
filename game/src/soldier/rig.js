@@ -192,7 +192,9 @@
   const ARM = {
     sling: { R: [0.62, -0.72, 0.30], L: [0.75, -0.62, 0.25], clav: [0.20, 0.14], reach: 0.95 },
     ready: { R: [0.22, -0.93, 0.30], L: [-0.11, -0.99, -0.06], clav: [0.30, 0.10], reach: 0.86 },
-    ads: { R: [0.30, -0.90, 0.30], L: [-0.06, -0.99, -0.10], clav: [0.30, 0.10], reach: 0.86 }
+    ads: { R: [0.30, -0.90, 0.30], L: [-0.06, -0.99, -0.10], clav: [0.30, 0.10], reach: 0.86 },
+    /* руки опущены вдоль тела: локоть смотрит назад и чуть наружу */
+    relaxed: { R: [0.18, -0.10, 1.0], L: [0.18, -0.10, 1.0], clav: [0, 0], reach: 1 }
   };
   function mixArm(a, b, k) {
     const l = (x, y) => x.map((v, i) => v + (y[i] - v) * k);
@@ -299,18 +301,19 @@
     };
   }
 
-  /* Кисти GLB (viewmodel/ak.js): запястье ставится в кисть рига, локоть
+  /* Кисти GLB (viewmodel/hands.js): запястье ставится в кисть рига, локоть
      выбирается так, чтобы предплечье шло вдоль кисти — тогда кисть не
      выламывается в запястье. handTargets — мировые матрицы кистей рига,
      handPoses — позы пальцев рига. */
   Rig.prototype.solveArmsGLB = function () {
-    const THREE = this.THREE, AKA = typeof self !== 'undefined' ? self.GAK : null;
+    const THREE = this.THREE, HANDS = typeof self !== 'undefined' ? self.GHands : null;
     const rest = this.char.rest;
     const chestQ = this.bone('chest').getWorldQuaternion(new THREE.Quaternion());
     const chestQi = chestQ.clone().invert();
     const kr = this.readyAmount === undefined ? 1 : U.clamp01(this.readyAmount);
     const ka = U.clamp01(this.adsAmount || 0);
-    const pose = mixArm(mixArm(ARM.sling, ARM.ready, kr), ARM.ads, ka);
+    /* armPose — явная поза локтей (например, ARM.relaxed для рук по швам) */
+    const pose = this.armPose || mixArm(mixArm(ARM.sling, ARM.ready, kr), ARM.ads, ka);
     this.gripTarget = this.gripTarget || {};
     this.armDebug = this.armDebug || {};
     const P = new THREE.Vector3(), Q = new THREE.Quaternion(), Sc = new THREE.Vector3();
@@ -363,7 +366,7 @@
       const hinge = new THREE.Vector3().crossVectors(pdir, dir).normalize().multiplyScalar(side);
       setWorldBasis(THREE, shoulder, up.clone().multiplyScalar(side), hinge);
       setWorldBasis(THREE, elbow, fo.clone().multiplyScalar(side), hinge);
-      const want = AKA.wristQuat(Q, SS, new THREE.Quaternion());
+      const want = HANDS.wristQuat(Q, SS, new THREE.Quaternion());
       wrist.quaternion.copy(elbow.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(want));
       wrist.updateMatrixWorld(true);
       const ft = this.bone('foreTwist' + SS), at = this.bone('armTwist' + SS);

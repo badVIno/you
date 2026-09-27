@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Sky } from 'three/addons/objects/Sky.js';
+import * as PROFILE from './lib/profile.js';
 
 /* Внешние ассеты (модели бойцов, текстуры, окружение) лежат в game/assets.
    С веб-сервера они берутся по относительному пути; при открытии файла
@@ -37,6 +38,10 @@ const GAssets = (() => {
   return { bases, data, fetchAny, image, add, progress, ready: () => Promise.all(jobs) };
 })();
 window.GAssets = GAssets;
+/* Общий профиль игрока (lib/profile.js) и библиотека оружия (lib/weapons):
+   оружие грузится как ассет — при сбое генералы просто остаются без оружия. */
+window.GProfile = PROFILE;
+GAssets.add('weapons', import('./lib/weapons/index.js'));
 
 const errEl = document.getElementById('err');
 const showErr = (e) => {

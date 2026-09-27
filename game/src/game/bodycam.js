@@ -16,17 +16,18 @@
 
    Руки — риг из того же файла (viewmodel/vm.js): перчатки GLB, рукава,
    позы наготове / в прицеле / на бегу, отдача и перезарядка. Рукав берёт
-   камуфляж формы бойца. Риг ведёт настоящий АК бойца, поэтому стрельба,
-   модули и эффекты остаются игровыми.
+   камуфляж формы бойца. Риг ведёт сборку оружия бойца (game/lib/weapons,
+   спека — viewmodel/wspec.js): setWeapon(build | null). Без оружия камера
+   работает так же, руки скрыты.
 
    Вид от третьего лица (T) использует тот же риг: камера рига ставится так,
    что её плечи совпадают с плечами бойца, а руки тела тянутся к кистям рига.
    ========================================================================== */
 (function (root, factory) {
-  const B = factory(root.THREE, root.GUtil, root.GVM, root.GAK);
+  const B = factory(root.THREE, root.GUtil, root.GVM, root.GWSpec);
   if (typeof module !== 'undefined' && module.exports) module.exports = B;
   else root.GBodycam = B;
-})(typeof self !== 'undefined' ? self : this, function (THREE, U, VM, AKA) {
+})(typeof self !== 'undefined' ? self : this, function (THREE, U, VM, WSPEC) {
   'use strict';
 
   /* параметры камеры и линзы (как в исходнике) */
@@ -45,7 +46,7 @@
     near: 0.02, adsNear: 0.11
   };
   /* Плечи рига относительно глаз: ~0,24 м ниже и чуть позади. Позы оружия
-     заданы в той же системе (viewmodel/ak.js). */
+     заданы в той же системе (viewmodel/wspec.js). */
   const SHOULDER_R = [0.18, -0.24, 0.13], SHOULDER_L = [-0.18, -0.24, 0.10];
   /* плечи рига в прежней, нагрудной системе — для вида от третьего лица */
   const SHOULDER_CHEST = [0.19, -0.12, 0.12];
@@ -134,22 +135,33 @@
   function create(env) {
     const { scene, camera } = env;
     const assets = root().GAssets && root().GAssets.data.vm_hands;
-    if (!VM || !AKA || !assets) return null;
+    if (!VM || !WSPEC || !assets) return null;
     VM.CONFIG.body.shoulderR = SHOULDER_R.slice();
     VM.CONFIG.body.shoulderL = SHOULDER_L.slice();
 
-    const model = AKA.createModel();
-    const spec = AKA.createSpec(model);
-    const rig = new VM.WeaponRig({ right: assets.clone(assets.right), left: assets.clone(assets.left) }, [spec]);
-    /* фонарь рига не нужен: у игры свои модули-фонари */
-    rig.flashlight.castShadow = false;
-    if (rig.flashlight.parent) rig.flashlight.parent.remove(rig.flashlight);
-    if (rig.flashlight.target.parent) rig.flashlight.target.parent.remove(rig.flashlight.target);
-    model.root.visible = false;                      // вместо модели — настоящий АК бойца
     const frame = new THREE.Group();                 // «камера рига» = глаза
     frame.name = 'bodycamRig';
-    frame.add(rig.root);
     scene.add(frame);
+    /* риг пересобирается под каждое оружие (спека зависит от сборки) */
+    let rig = null, spec = null, ws = null, build = null;
+    function setWeapon(b) {
+      if (b === build) return;
+      if (rig) frame.remove(rig.root);
+      build = b || null;
+      rig = null; spec = null; ws = null;
+      if (build) {
+        ws = WSPEC.createSpec(build);
+        spec = ws.spec;
+        rig = new VM.WeaponRig({ right: assets.clone(assets.right), left: assets.clone(assets.left) }, [spec]);
+        /* фонарь рига не нужен */
+        rig.flashlight.castShadow = false;
+        if (rig.flashlight.parent) rig.flashlight.parent.remove(rig.flashlight);
+        if (rig.flashlight.target.parent) rig.flashlight.target.parent.remove(rig.flashlight.target);
+        ws.model.root.visible = false;               // вместо модели — сборка бойца
+        frame.add(rig.root);
+      }
+      st.active = null;
+    }
 
     const st = {
       active: null,
@@ -176,9 +188,11 @@
       st.lastStep = Math.floor((c.stepPhase || 0) * 2);
       st.lastShot = c.lastShot; st.reloadWas = c.reload;
       st.prevY = c.yaw; st.prevX = c.pitch;
-      const sm = sleeveMaterial(s.char);
-      for (const a of [rig.armR, rig.armL]) { a.sleeve.mesh.material = sm; a.sleeveTab.material = sm; }
-      rig.reloading = false;
+      if (rig) {
+        const sm = sleeveMaterial(s.char);
+        for (const a of [rig.armR, rig.armL]) { a.sleeve.mesh.material = sm; a.sleeveTab.material = sm; }
+        rig.reloading = false;
+      }
     }
 
     /* Кадр управляемого бойца. mode: 'fp' — камера на шлеме, руки рига;
@@ -228,19 +242,22 @@
         st.lastShot = c.lastShot;
         const k = P.shake * 0.8;
         st.shP.v += 1.9 * k; st.shR.v += (Math.random() - 0.5) * 2.2 * k; st.shYaw.v += (Math.random() - 0.5) * k; st.shY.v -= 0.15 * k;
-        const S0 = rig.states[0];
-        S0.mag = 30; S0.chambered = true; S0.locked = false;
-        rig.cooldown = 0;
-        rig.pullTrigger(true);
+        if (rig) {
+          const S0 = rig.states[0];
+          S0.mag = spec.tuning.magSize; S0.chambered = true; S0.locked = false;
+          rig.cooldown = 0;
+          rig.pullTrigger(true);
+        }
       }
       /* перезарядка игры -> анимация рига той же длительности */
-      if (c.reload >= 0 && st.reloadWas < 0) {
+      if (rig && c.reload >= 0 && st.reloadWas < 0) {
         const tr = c.reloadWasEmpty ? spec.empty : spec.tactical;
-        const dur = c.reloadWasEmpty ? 3.05 : 2.45;
+        const W = c.WPN || {};
+        const dur = c.reloadWasEmpty ? (W.reloadEmpty || 3.05) : (W.reloadTime || 2.45);
         rig.reloading = true; rig.reloadT = 0; rig.track = tr; rig.fumbled = false;
         rig.reloadSpeed = tr.duration / dur;
-        rig.states[0].mag = 29;
-      } else if (c.reload < 0 && rig.reloading && st.reloadWas >= 0) rig.reloading = false;
+        rig.states[0].mag = Math.max(0, spec.tuning.magSize - 1);
+      } else if (rig && c.reload < 0 && rig.reloading && st.reloadWas >= 0) rig.reloading = false;
       st.reloadWas = c.reload;
 
       /* Разгон и торможение в системе головы: при рывке вперёд голова
@@ -328,10 +345,12 @@
         /* на бегу оружие прижато к груди и не водится за взглядом */
         offsetYaw: wrapAng(aimYaw - camYaw) * (1 - spr * 0.7), offsetPitch: wrapAng(aimPitch - camPitch) * (1 - spr * 0.9)
       };
-      rig.update(Math.min(dt, 0.05), player, vmCam, level, { lmb: !!c.triggerHeld && c.ammo > 0 });
-      rig.root.visible = mode === 'fp';
-      frame.updateMatrixWorld(true);
-      AKA.applyToGun(rig, s.gun, rig.root.matrixWorld);
+      if (rig) {
+        rig.update(Math.min(dt, 0.05), player, vmCam, level, { lmb: !!c.triggerHeld && c.ammo > 0 });
+        rig.root.visible = mode === 'fp';
+        frame.updateMatrixWorld(true);
+        ws.apply(rig, rig.root.matrixWorld);
+      }
 
       if (mode === 'fp') {
         camera.position.copy(frame.position);
@@ -357,6 +376,7 @@
 
     /* Кисти рига в мире — для рук тела от третьего лица. */
     function handTargets(out) {
+      if (!rig) return null;
       rig.root.updateMatrixWorld(true);
       out.R = rig.right.anchor.matrixWorld; out.L = rig.left.anchor.matrixWorld;
       out.poseR = rig.right.pose; out.poseL = rig.left.pose;
@@ -364,8 +384,9 @@
     }
 
     return {
-      rig, spec, frame, update, measureShift, handTargets, P,
-      hide() { rig.root.visible = false; },
+      get rig() { return rig; }, get spec() { return spec; }, get weapon() { return build; },
+      frame, update, measureShift, handTargets, setWeapon, P,
+      hide() { if (rig) rig.root.visible = false; },
       /* вне вида от первого лица ближняя плоскость — обычная */
       resetNear() { if (camera.near !== P.near) { camera.near = P.near; camera.updateProjectionMatrix(); } },
       get lensAmount() { return st.lens || 0; }

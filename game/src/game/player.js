@@ -40,7 +40,7 @@
   };
 
   /* Характеристики оружия (АК-74). Часть перекрывается системой модулей. */
-  const WPN = {
+  const WPN_BASE = {
     rpm: 650,
     magDefault: 30,
     reserve: 180,
@@ -69,6 +69,8 @@
   };
 
   function create(THREE, opts) {
+    /* у каждого бойца свои характеристики оружия (см. P.configure) */
+    const WPN = Object.assign({}, WPN_BASE);
     const world = opts.world;
     const audio = opts.audio;
     const fx = opts.fx;
@@ -472,10 +474,40 @@
       if (P.onFire) P.onFire();
     };
 
+    /* Характеристики из сборки оружия (game/lib/weapons: build.stats).
+       null — без оружия: стрельба и прицел недоступны. */
+    P.configure = function (st) {
+      Object.assign(WPN, WPN_BASE);
+      P.armed = !!st;
+      if (!st) {
+        P.magCap = 0; P.ammo = 0; P.reserve = 0; P.fireModes = ['safe']; P.fireMode = 'safe';
+        P.reload = -1; P.ads = 0;
+        return;
+      }
+      const kv = (st.recoilV || 100) / 100, kh = (st.recoilH || 100) / 100;
+      WPN.rpm = st.rpm || 600;
+      WPN.muzzleVel = st.velocity || 850;
+      WPN.adsTime = (st.adsTime || 280) / 1000;
+      WPN.recoilUp = WPN_BASE.recoilUp * kv; WPN.kickPitch = WPN_BASE.kickPitch * kv;
+      WPN.recoilSide = WPN_BASE.recoilSide * kh; WPN.kickYaw = WPN_BASE.kickYaw * kh;
+      /* кучность: MOA -> рад, в прицеле не лучше 0,5 мрад (стрелок, не станок) */
+      WPN.spreadAds = Math.max(0.0005, (st.moa || 2) * 0.000291 * 1.5);
+      WPN.reloadTime = st.magCap <= 5 ? 3.2 : WPN_BASE.reloadTime;
+      WPN.reloadEmpty = WPN.reloadTime + 0.6;
+      P.magCap = st.magCap || 30; P.ammo = P.magCap;
+      P.reserve = st.reserve !== undefined ? st.reserve : P.magCap * 4;
+      const modes = (st.modes || ['semi']).map((m) => (m === 'pump' || m === 'burst' ? 'semi' : m));
+      P.fireModes = ['safe', ...new Set(modes)];
+      P.fireMode = P.fireModes.includes('auto') ? 'auto' : P.fireModes[1] || 'semi';
+      P.pellets = st.pellets || 1;
+      P.reload = -1;
+    };
+    P.armed = true;
+
     P.PHYS = PHYS;
     P.WPN = WPN;
     return P;
   }
 
-  return { create, PHYS, WPN };
+  return { create, PHYS, WPN: WPN_BASE };
 });

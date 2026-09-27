@@ -33,7 +33,7 @@
          жёсткий компрессор с автоуровнем. Именно это даёт «звук с бодикама»:
          выстрел сплющен и хрустит, а шаги, дыхание и шорох снаряжения —
          близко и громко. */
-      const master = ctx.createGain(); master.gain.value = 0.8;
+      const master = ctx.createGain(); master.gain.value = A.vol;
       const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 120; hp.Q.value = 0.7;
       const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 2800; pres.Q.value = 0.9; pres.gain.value = 4;
       const lpm = ctx.createBiquadFilter(); lpm.type = 'lowpass'; lpm.frequency.value = 7800;
@@ -445,7 +445,13 @@
     };
     A.setMuted = function (m) {
       A.on = !m;
-      if (A.master) A.master.gain.value = m ? 0 : 0.8;
+      if (A.master) A.master.gain.value = m ? 0 : A.vol;
+    };
+    /* громкость из настроек (0..1) */
+    A.vol = 0.8;
+    A.setVolume = function (v) {
+      A.vol = Math.max(0, Math.min(1, +v || 0));
+      if (A.master && A.on) A.master.gain.value = A.vol;
     };
 
     return A;
