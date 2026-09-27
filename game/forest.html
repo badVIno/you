@@ -2,6 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
+<script>/*SIGNUM-BOOT*/(function(){var b=/[?&]battle\b/.test(location.search);window.SIGNUM_BATTLE=b;if(!b)return;document.documentElement.classList.add("signum-battle");try{var p=JSON.parse(localStorage.getItem("signum:profile")||"{}");var q=(p.settings&&p.settings.quality)||"medium";localStorage.setItem("tikhiy_bor_q",{low:"low",medium:"medium",high:"high"}[q]||"medium");}catch(e){}})();</script>
+<link rel="stylesheet" href="lib/ui.css"><link rel="stylesheet" href="lib/battle/battle.css">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ТИХИЙ БОР · Forest Front</title>
 <script type="importmap">
@@ -19700,6 +19702,7 @@ function finish() {
   };
   window.MAP_API = {
     validate,
+    /*SIGNUM-API*/ pushOut, supportTop, ceilingAt, nearby, hFast, rayCast, losClear, die, toast, blast: BLAST, flagList: FLAGS, bases: BASE, houses: HOUSES, mines: MINES, frame: FRAME, enter, pauseGame, pauseState: PAUSE, lakeRho, inBog, edgeDist, trenchDist, forestFast, blastExposure, initAudio, audio: AUDIO, fx: FX, ladderAt, cal: CAL, ammoState: AMMO, inter: INTER, groundHit, crate: CRATE, spawnsAt: SPAWNS,
     THREE: THREE35,
     scene,
     camera,
@@ -20111,6 +20114,7 @@ function frame2(dt, render = true) {
   updateCrates();
   updateAmmo(dt);
   updateLeaves(dt);
+  /*SIGNUM-HOOK*/ if (window.MAP_HOOKS) for (const f of window.MAP_HOOKS) f(dt);
   burnPlayer(dt, Math.max(heatAt(PL.pos.x, PL.pos.z), structHeatAt(PL.pos.x, PL.pos.z)));
   const ground = hFast(camera.position.x, camera.position.z);
   updateParticles(dt, { night: SKY.night, h: TIME.h, fogColor: SKY.fogColor, ground, light: Math.max(0.12, (0.2 + 0.8 * (1 - SKY.night)) * (1 - WEATHER.ov * 0.3)) });
@@ -20144,6 +20148,7 @@ function frame2(dt, render = true) {
   composer.render();
   if (GPUT.on) gpuPoll();
   updateHud(dt);
+  /*SIGNUM-HUD*/ if (window.MAP_HUD_HOOKS) for (const f of window.MAP_HUD_HOOKS) f(dt);
   const hint = hudEls().hint ??= $("#hint");
   if (hint.textContent !== INTER.hint) {
     hint.textContent = INTER.hint;
@@ -20272,5 +20277,6 @@ build().catch((err) => {
 });
 
 </script>
+<script type="module">/*SIGNUM-LOADER*/if (window.SIGNUM_BATTLE) import("./lib/battle/main.js").catch((e) => { console.error(e); window.SIGNUM_FATAL && window.SIGNUM_FATAL(e); });</script>
 </body>
 </html>
